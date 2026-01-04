@@ -4,6 +4,3 @@
 [submodule "lua-intf"]
 	path = lua-intf
 	url = https://github.com/Pillar1989/lua-intf
-[submodule "onnxruntime"]
-	path = onnxruntime
-	url = https://github.com/microsoft/onnxruntime
