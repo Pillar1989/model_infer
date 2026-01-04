@@ -101,3 +101,36 @@ set_target_properties(cpp_infer PROPERTIES
     INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}"
 )
 
+# ==========================================================
+# 6. Tensor API Test Program
+# ==========================================================
+add_executable(test_tensor 
+    src/test_main.cpp
+    ${MODULE_SOURCES}
+    ${BINDING_SOURCES}
+)
+
+target_link_libraries(test_tensor PRIVATE 
+    LuaIntf 
+    lua 
+    ${OpenCV_LIBS} 
+    onnxruntime
+)
+
+target_include_directories(test_tensor PRIVATE 
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/modules"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/bindings"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/utils"
+    ${OpenCV_INCLUDE_DIRS}
+    ${ONNXRUNTIME_INCLUDE_DIRS}
+)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(test_tensor PRIVATE dl)
+endif()
+
+set_target_properties(test_tensor PROPERTIES
+    BUILD_RPATH "${ONNXRUNTIME_LIB_DIR}"
+    INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}"
+)
