@@ -1,6 +1,6 @@
 [submodule "lua"]
 	path = lua
 	url = https://github.com/lua/lua
-[submodule "lua-intf"]
-	path = lua-intf
+[submodule "lua-intf-ex"]
+	path = lua-intf-ex
 	url = https://github.com/Pillar1989/lua-intf

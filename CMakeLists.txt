@@ -25,7 +25,7 @@ target_include_directories(lua PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/lua")
 # LuaIntf is header-only, but we need to make sure it finds our Lua
 add_library(LuaIntf INTERFACE)
 target_include_directories(LuaIntf INTERFACE 
-    "${CMAKE_CURRENT_SOURCE_DIR}/lua-intf/src/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/lua-intf-ex/src/include"
 )
 target_link_libraries(LuaIntf INTERFACE lua)
 
