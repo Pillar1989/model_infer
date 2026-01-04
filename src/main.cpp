@@ -1,6 +1,5 @@
 #include <iostream>
 #include <string>
-#include <lua.hpp>
 #include "LuaIntf.h"
 
 // 模块头文件
