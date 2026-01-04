@@ -1,10 +1,12 @@
 #ifndef MODEL_INFER_LUA_NN_H_
 #define MODEL_INFER_LUA_NN_H_
 
-#include "onnxruntime_cxx_api.h"
-#include "LuaIntf.h"
 #include <vector>
 #include <memory>
+#include <algorithm>
+
+#include "onnxruntime_cxx_api.h"
+#include "LuaIntf.h"
 
 namespace lua_nn {
 
@@ -26,6 +28,11 @@ public:
     // YOLO特化方法（性能关键）
     LuaIntf::LuaRef filter_yolo(lua_State* L, float conf_thres);
     LuaIntf::LuaRef filter_yolo_pose(lua_State* L, float conf_thres);
+    LuaIntf::LuaRef filter_yolo_seg(lua_State* L, float conf_thres);
+    
+    // Mask处理
+    LuaIntf::LuaRef process_mask(lua_State* L, const LuaIntf::LuaRef& mask_coeffs, 
+                                      const LuaIntf::LuaRef& box, int img_w, int img_h);
     
     // 通用方法（为其他任务扩展）
     LuaIntf::LuaRef argmax(lua_State* L);

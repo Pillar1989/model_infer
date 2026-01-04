@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <numeric>
 #include <iostream>
+#include <opencv2/opencv.hpp>
 
 namespace lua_nn {
 
@@ -240,6 +241,196 @@ LuaIntf::LuaRef Tensor::filter_yolo_pose(lua_State* L, float conf_thres) {
     return results;
 }
 
+LuaIntf::LuaRef Tensor::filter_yolo_seg(lua_State* L, float conf_thres) {
+    if (shape_.size() != 3 || shape_[0] != 1) {
+        throw std::runtime_error("Invalid YOLO Seg output shape");
+    }
+    
+    int64_t dim1 = shape_[1];
+    int64_t dim2 = shape_[2];
+    
+    // Heuristic for [1, 116, 8400] (32 masks + 4 box + 80 classes)
+    bool transposed = (dim1 < dim2 && dim2 > 100); 
+    
+    int64_t num_boxes = transposed ? dim2 : dim1;
+    int64_t box_dim = transposed ? dim1 : dim2;
+    
+    // 4 box + 80 classes + 32 masks = 116
+    int num_classes = 80; 
+    int num_masks = 32;
+    
+    if (box_dim != (4 + num_classes + num_masks)) {
+        // Try to infer
+        num_masks = 32;
+        num_classes = box_dim - 4 - num_masks;
+    }
+    
+    LuaIntf::LuaRef results = LuaIntf::LuaRef::createTable(L);
+    int result_idx = 1;
+    
+    const float* data_ptr = data_->data();
+
+    for (int64_t i = 0; i < num_boxes; ++i) {
+        float cx, cy, w, h;
+        
+        if (transposed) {
+            cx = data_ptr[0 * num_boxes + i];
+            cy = data_ptr[1 * num_boxes + i];
+            w  = data_ptr[2 * num_boxes + i];
+            h  = data_ptr[3 * num_boxes + i];
+        } else {
+            const float* box_data = data_ptr + i * box_dim;
+            cx = box_data[0];
+            cy = box_data[1];
+            w  = box_data[2];
+            h  = box_data[3];
+        }
+        
+        int best_class_id = 0;
+        float best_class_score = -1.0f;
+        
+        int class_start = 4;
+        
+        if (transposed) {
+             best_class_score = data_ptr[(class_start + 0) * num_boxes + i];
+             best_class_id = 0;
+
+             for (int c = 1; c < num_classes; ++c) {
+                 float score = data_ptr[(class_start + c) * num_boxes + i];
+                 if (score > best_class_score) {
+                     best_class_score = score;
+                     best_class_id = c;
+                 }
+             }
+        } else {
+             const float* box_data = data_ptr + i * box_dim;
+             const float* class_scores = box_data + class_start;
+             
+             best_class_score = class_scores[0];
+             for (int c = 1; c < num_classes; ++c) {
+                 if (class_scores[c] > best_class_score) {
+                     best_class_score = class_scores[c];
+                     best_class_id = c;
+                 }
+             }
+        }
+        
+        if (best_class_score < conf_thres) continue;
+        
+        float x = cx - w / 2.0f;
+        float y = cy - h / 2.0f;
+        
+        LuaIntf::LuaRef box = LuaIntf::LuaRef::createTable(L);
+        box["x"] = x;
+        box["y"] = y;
+        box["w"] = w;
+        box["h"] = h;
+        box["score"] = best_class_score;
+        box["class_id"] = best_class_id;
+        
+        // Extract Mask Coefficients
+        LuaIntf::LuaRef mask_coeffs = LuaIntf::LuaRef::createTable(L);
+        int mask_start = 4 + num_classes;
+        
+        for (int m = 0; m < num_masks; ++m) {
+            float val;
+            if (transposed) {
+                val = data_ptr[(mask_start + m) * num_boxes + i];
+            } else {
+                val = data_ptr[i * box_dim + mask_start + m];
+            }
+            mask_coeffs[m + 1] = val;
+        }
+        box["mask_coeffs"] = mask_coeffs;
+        
+        results[result_idx++] = box;
+    }
+    
+    return results;
+}
+
+LuaIntf::LuaRef Tensor::process_mask(lua_State* L, const LuaIntf::LuaRef& mask_coeffs, 
+                                   const LuaIntf::LuaRef& box, int img_w, int img_h) {
+    const Tensor& proto = *this;
+    // proto: [1, 32, 160, 160]
+    // mask_coeffs: [32]
+    
+    auto proto_shape = proto.shape();
+    if (proto_shape.size() != 4 || proto_shape[1] != 32) {
+        throw std::runtime_error("Invalid proto mask shape");
+    }
+    
+    int mh = proto_shape[2];
+    int mw = proto_shape[3];
+    int num_masks = 32;
+    
+    // 1. Matrix Multiplication: Mask = Coeffs * Proto
+    // Coeffs: 1x32, Proto: 32x(160*160) -> 1x(160*160)
+    
+    cv::Mat proto_mat(num_masks, mh * mw, CV_32F, (void*)proto.raw_data());
+    cv::Mat coeffs_mat(1, num_masks, CV_32F);
+    
+    for (int i = 0; i < num_masks; ++i) {
+        coeffs_mat.at<float>(0, i) = mask_coeffs.get<float>(i + 1);
+    }
+    
+    cv::Mat mask_flat = coeffs_mat * proto_mat; // 1 x 25600
+    cv::Mat mask = mask_flat.reshape(1, mh); // 160 x 160
+    
+    // 2. Sigmoid
+    cv::exp(-mask, mask);
+    mask = 1.0f / (1.0f + mask);
+    
+    // 3. Resize to original image size
+    // Note: The mask is defined on the letterboxed image, not the original image directly.
+    // But here we are given img_w, img_h which are likely the original image dimensions.
+    // However, the box is also in original coordinates (if post-processed).
+    // Wait, usually we process mask on the letterboxed scale (e.g. 640x640) then crop to box, then resize to original box.
+    // Or resize mask to 640x640, then crop/resize to original.
+    
+    // Let's assume we resize the 160x160 mask to img_w x img_h directly (simple approach)
+    // But correct approach is:
+    // 1. Resize 160x160 -> 640x640 (input size)
+    // 2. Crop to the box (in 640x640 coords)
+    // 3. Resize to box size (in original coords)
+    // OR:
+    // 1. Resize 160x160 -> img_w x img_h
+    // 2. Threshold
+    // 3. Crop by box
+    
+    // Let's take a simpler approach often used:
+    // Resize mask to img_w x img_h
+    cv::Mat resized_mask;
+    cv::resize(mask, resized_mask, cv::Size(img_w, img_h), 0, 0, cv::INTER_LINEAR);
+    
+    // 4. Crop by box (set pixels outside box to 0)
+    float x = box.get<float>("x");
+    float y = box.get<float>("y");
+    float w = box.get<float>("w");
+    float h = box.get<float>("h");
+    
+    cv::Rect roi(x, y, w, h);
+    // Clip ROI
+    roi = roi & cv::Rect(0, 0, img_w, img_h);
+    
+    cv::Mat final_mask = cv::Mat::zeros(img_h, img_w, CV_32F);
+    if (roi.area() > 0) {
+        resized_mask(roi).copyTo(final_mask(roi));
+    }
+    
+    // 5. Threshold (> 0.5)
+    cv::threshold(final_mask, final_mask, 0.5, 1.0, cv::THRESH_BINARY);
+    
+    // Return as vector<float> or similar?
+    // Let's return a Tensor (1xHxW)
+    std::vector<float> mask_data(img_w * img_h);
+    // Copy data (ensure float)
+    // final_mask is CV_32F
+    std::memcpy(mask_data.data(), final_mask.data, img_w * img_h * sizeof(float));
+    
+    return LuaIntf::LuaRef::fromValue(L, Tensor(std::move(mask_data), {1, (int64_t)img_h, (int64_t)img_w}));
+}
+
 // Session Implementation
 Session::Session(const std::string& model_path)
     : env_(std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "model_infer")),
@@ -413,6 +604,8 @@ void register_module(lua_State* L) {
                 .addFunction("view", &Tensor::view)
                 .addFunction("filter_yolo", &Tensor::filter_yolo)
                 .addFunction("filter_yolo_pose", &Tensor::filter_yolo_pose)
+                .addFunction("filter_yolo_seg", &Tensor::filter_yolo_seg)
+                .addFunction("process_mask", &Tensor::process_mask)
                 .addFunction("argmax", &Tensor::argmax)
                 .addFunction("topk", &Tensor::topk)
                 .addMetaFunction("__len", [](const Tensor* t) { return t->size(); })

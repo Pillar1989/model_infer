@@ -180,6 +180,27 @@ int main(int argc, char* argv[]) {
                             cv::rectangle(draw_img, cv::Point(x, y - textSize.height - 5), cv::Point(x + textSize.width, y), cv::Scalar(0, 255, 0), -1);
                             cv::putText(draw_img, text, cv::Point(x, y - 5), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
                             
+                            // Segmentation Visualization
+                            if (det.has("mask")) {
+                                lua_nn::Tensor mask_tensor = det.get<lua_nn::Tensor>("mask");
+                                // Mask is 1xHxW float tensor (0 or 1)
+                                int mh = mask_tensor.shape()[1];
+                                int mw = mask_tensor.shape()[2];
+                                
+                                cv::Mat mask(mh, mw, CV_32F, mask_tensor.raw_data());
+                                cv::Mat mask_u8;
+                                mask.convertTo(mask_u8, CV_8U, 255);
+                                
+                                // Create colored mask
+                                cv::Mat color_mask = cv::Mat::zeros(mh, mw, CV_8UC3);
+                                // Random color based on class or index
+                                cv::Scalar color(rand()%255, rand()%255, rand()%255);
+                                color_mask.setTo(color, mask_u8);
+                                
+                                // Overlay
+                                cv::addWeighted(draw_img, 1.0, color_mask, 0.5, 0, draw_img);
+                            }
+
                             // Pose Visualization
                             if (det.has("keypoints")) {
                                 LuaIntf::LuaRef kpts = det.get<LuaIntf::LuaRef>("keypoints");
