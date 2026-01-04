@@ -4,3 +4,6 @@
 [submodule "lua-intf-ex"]
 	path = lua-intf-ex
 	url = https://github.com/Pillar1989/lua-intf
+[submodule "luajit"]
+	path = luajit
+	url = https://luajit.org/git/luajit.git
