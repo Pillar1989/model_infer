@@ -25,6 +25,7 @@ public:
     
     // YOLO特化方法（性能关键）
     LuaIntf::LuaRef filter_yolo(lua_State* L, float conf_thres);
+    LuaIntf::LuaRef filter_yolo_pose(lua_State* L, float conf_thres);
     
     // 通用方法（为其他任务扩展）
     LuaIntf::LuaRef argmax(lua_State* L);

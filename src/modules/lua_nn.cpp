@@ -159,6 +159,87 @@ LuaIntf::LuaRef Tensor::topk(lua_State* L, int k) {
     return result;
 }
 
+LuaIntf::LuaRef Tensor::filter_yolo_pose(lua_State* L, float conf_thres) {
+    if (shape_.size() != 3 || shape_[0] != 1) {
+        throw std::runtime_error("Invalid YOLO Pose output shape");
+    }
+    
+    int64_t dim1 = shape_[1];
+    int64_t dim2 = shape_[2];
+    
+    // Heuristic for [1, 56, 8400]
+    bool transposed = (dim1 < dim2 && dim2 > 100); 
+    
+    int64_t num_boxes = transposed ? dim2 : dim1;
+    int64_t box_dim = transposed ? dim1 : dim2;
+    
+    LuaIntf::LuaRef results = LuaIntf::LuaRef::createTable(L);
+    int result_idx = 1;
+    
+    const float* data_ptr = data_->data();
+
+    for (int64_t i = 0; i < num_boxes; ++i) {
+        float cx, cy, w, h, score;
+        
+        if (transposed) {
+            // [1, C, N] -> stride is N (num_boxes)
+            cx = data_ptr[0 * num_boxes + i];
+            cy = data_ptr[1 * num_boxes + i];
+            w  = data_ptr[2 * num_boxes + i];
+            h  = data_ptr[3 * num_boxes + i];
+            score = data_ptr[4 * num_boxes + i];
+        } else {
+            // [1, N, C] -> stride is C (box_dim)
+            const float* box_data = data_ptr + i * box_dim;
+            cx = box_data[0];
+            cy = box_data[1];
+            w  = box_data[2];
+            h  = box_data[3];
+            score = box_data[4];
+        }
+        
+        if (score < conf_thres) continue;
+        
+        float x = cx - w / 2.0f;
+        float y = cy - h / 2.0f;
+        
+        LuaIntf::LuaRef box = LuaIntf::LuaRef::createTable(L);
+        box["x"] = x;
+        box["y"] = y;
+        box["w"] = w;
+        box["h"] = h;
+        box["score"] = score;
+        box["class_id"] = 0; // Pose usually has only 1 class (person)
+        
+        // Extract Keypoints
+        LuaIntf::LuaRef kpts = LuaIntf::LuaRef::createTable(L);
+        for (int k = 0; k < 17; ++k) {
+            float kx, ky, kv;
+            if (transposed) {
+                kx = data_ptr[(5 + k * 3 + 0) * num_boxes + i];
+                ky = data_ptr[(5 + k * 3 + 1) * num_boxes + i];
+                kv = data_ptr[(5 + k * 3 + 2) * num_boxes + i];
+            } else {
+                const float* box_data = data_ptr + i * box_dim;
+                kx = box_data[5 + k * 3 + 0];
+                ky = box_data[5 + k * 3 + 1];
+                kv = box_data[5 + k * 3 + 2];
+            }
+            
+            LuaIntf::LuaRef kp = LuaIntf::LuaRef::createTable(L);
+            kp["x"] = kx;
+            kp["y"] = ky;
+            kp["v"] = kv;
+            kpts[k + 1] = kp;
+        }
+        box["keypoints"] = kpts;
+        
+        results[result_idx++] = box;
+    }
+    
+    return results;
+}
+
 // Session Implementation
 Session::Session(const std::string& model_path)
     : env_(std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "model_infer")),
@@ -331,6 +412,7 @@ void register_module(lua_State* L) {
                 .addFunction("shape", &Tensor::shape)
                 .addFunction("view", &Tensor::view)
                 .addFunction("filter_yolo", &Tensor::filter_yolo)
+                .addFunction("filter_yolo_pose", &Tensor::filter_yolo_pose)
                 .addFunction("argmax", &Tensor::argmax)
                 .addFunction("topk", &Tensor::topk)
                 .addMetaFunction("__len", [](const Tensor* t) { return t->size(); })
