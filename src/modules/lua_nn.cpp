@@ -2,17 +2,986 @@
 #include <algorithm>
 #include <numeric>
 #include <iostream>
+#include <cmath>
+#include <stdexcept>
+#include <sstream>
 #include <opencv2/opencv.hpp>
+
+// 启用vector的Lua table自动转换
+namespace LuaIntf {
+    LUA_USING_LIST_TYPE(std::vector)
+}
 
 namespace lua_nn {
 
-// Tensor Implementation
+// ========== Tensor构造函数 ==========
 Tensor::Tensor(const std::vector<float>& data, const std::vector<int64_t>& shape)
-    : data_(std::make_shared<std::vector<float>>(data)), shape_(shape) {}
+    : data_(std::make_shared<std::vector<float>>(data))
+    , shape_(shape)
+    , strides_(compute_strides(shape))
+    , offset_(0)
+    , contiguous_(true) {}
 
 Tensor::Tensor(std::vector<float>&& data, const std::vector<int64_t>& shape)
-    : data_(std::make_shared<std::vector<float>>(std::move(data))), shape_(shape) {}
+    : data_(std::make_shared<std::vector<float>>(std::move(data)))
+    , shape_(shape)
+    , strides_(compute_strides(shape))
+    , offset_(0)
+    , contiguous_(true) {}
 
+Tensor::Tensor(const float* data, const std::vector<int64_t>& shape, std::shared_ptr<std::vector<float>> owner)
+    : shape_(shape)
+    , strides_(compute_strides(shape))
+    , offset_(0)
+    , contiguous_(true) {
+    if (owner) {
+        data_ = owner;
+    } else {
+        int64_t total_size = compute_size();
+        data_ = std::make_shared<std::vector<float>>(data, data + total_size);
+    }
+}
+
+Tensor::Tensor(std::shared_ptr<std::vector<float>> data,
+               const std::vector<int64_t>& shape,
+               const std::vector<int64_t>& strides,
+               int64_t offset,
+               bool contiguous)
+    : data_(data)
+    , shape_(shape)
+    , strides_(strides)
+    , offset_(offset)
+    , contiguous_(contiguous) {}
+
+// ========== 辅助方法 ==========
+int64_t Tensor::size() const {
+    return compute_size();
+}
+
+int64_t Tensor::size(int dim) const {
+    if (dim < 0) dim += shape_.size();
+    if (dim < 0 || dim >= static_cast<int>(shape_.size())) {
+        throw std::runtime_error("Dimension out of range");
+    }
+    return shape_[dim];
+}
+
+int64_t Tensor::compute_size() const {
+    if (shape_.empty()) return 0;
+    return std::accumulate(shape_.begin(), shape_.end(), 1LL, std::multiplies<int64_t>());
+}
+
+std::vector<int64_t> Tensor::compute_strides(const std::vector<int64_t>& shape) const {
+    std::vector<int64_t> strides(shape.size());
+    if (shape.empty()) return strides;
+    
+    strides[shape.size() - 1] = 1;
+    for (int i = shape.size() - 2; i >= 0; --i) {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+    return strides;
+}
+
+void Tensor::normalize_axis(int& axis) const {
+    if (axis < 0) axis += shape_.size();
+    if (axis < 0 || axis >= static_cast<int>(shape_.size())) {
+        throw std::runtime_error("Axis out of range");
+    }
+}
+
+int64_t Tensor::compute_offset(const std::vector<int64_t>& indices) const {
+    if (indices.size() != shape_.size()) {
+        throw std::runtime_error("Indices size mismatch");
+    }
+    
+    int64_t offset = offset_;
+    for (size_t i = 0; i < indices.size(); ++i) {
+        int64_t idx = indices[i];
+        if (idx < 0) idx += shape_[i];
+        if (idx < 0 || idx >= shape_[i]) {
+            throw std::runtime_error("Index out of range");
+        }
+        offset += idx * strides_[i];
+    }
+    return offset;
+}
+
+Tensor Tensor::contiguous_copy() const {
+    if (contiguous_) {
+        return *this;
+    }
+    
+    std::vector<float> new_data(compute_size());
+    // TODO: 实现非连续tensor的连续拷贝
+    // 这里需要递归遍历所有维度
+    throw std::runtime_error("contiguous_copy not yet implemented for non-contiguous tensors");
+}
+
+// ========== Level 1: 基础形状操作 ==========
+Tensor Tensor::slice(int dim, int64_t start, int64_t end, int64_t step) const {
+    if (dim < 0) dim += shape_.size();
+    if (dim < 0 || dim >= static_cast<int>(shape_.size())) {
+        throw std::runtime_error("Dimension out of range");
+    }
+    
+    // 处理负索引
+    if (start < 0) start += shape_[dim];
+    if (end < 0) end += shape_[dim];
+    
+    // 边界检查
+    start = std::max(int64_t(0), std::min(start, shape_[dim]));
+    end = std::max(int64_t(0), std::min(end, shape_[dim]));
+    
+    if (start >= end || step <= 0) {
+        throw std::runtime_error("Invalid slice parameters");
+    }
+    
+    // 创建新的shape和strides
+    std::vector<int64_t> new_shape = shape_;
+    new_shape[dim] = (end - start + step - 1) / step;
+    
+    std::vector<int64_t> new_strides = strides_;
+    new_strides[dim] = strides_[dim] * step;
+    
+    int64_t new_offset = offset_ + start * strides_[dim];
+    
+    // 判断是否仍然连续（只有最后一维且step=1才连续）
+    bool new_contiguous = contiguous_ && (dim == shape_.size() - 1) && (step == 1);
+    
+    return Tensor(data_, new_shape, new_strides, new_offset, new_contiguous);
+}
+
+Tensor Tensor::reshape(const std::vector<int64_t>& new_shape) const {
+    // 计算新的总大小
+    int64_t new_size = 1;
+    int infer_dim = -1;
+    for (size_t i = 0; i < new_shape.size(); ++i) {
+        if (new_shape[i] == -1) {
+            if (infer_dim != -1) {
+                throw std::runtime_error("Only one dimension can be -1");
+            }
+            infer_dim = i;
+        } else {
+            new_size *= new_shape[i];
+        }
+    }
+    
+    // 推断-1维度
+    std::vector<int64_t> final_shape = new_shape;
+    if (infer_dim != -1) {
+        int64_t current_size = compute_size();
+        if (current_size % new_size != 0) {
+            throw std::runtime_error("Cannot infer dimension size");
+        }
+        final_shape[infer_dim] = current_size / new_size;
+        new_size = current_size;
+    }
+    
+    // 检查大小匹配
+    if (new_size != compute_size()) {
+        throw std::runtime_error("Shape size mismatch");
+    }
+    
+    // Reshape要求tensor是连续的
+    if (!contiguous_) {
+        return contiguous_copy().reshape(final_shape);
+    }
+    
+    // 零拷贝reshape
+    return Tensor(data_, final_shape, compute_strides(final_shape), offset_, true);
+}
+
+Tensor Tensor::transpose(const std::vector<int>& dims) const {
+    if (dims.size() != shape_.size()) {
+        throw std::runtime_error("Transpose dimensions mismatch");
+    }
+    
+    // 检查dims是否是有效的排列
+    std::vector<bool> used(dims.size(), false);
+    for (int dim : dims) {
+        int d = dim;
+        if (d < 0) d += dims.size();
+        if (d < 0 || d >= static_cast<int>(dims.size()) || used[d]) {
+            throw std::runtime_error("Invalid transpose dimensions");
+        }
+        used[d] = true;
+    }
+    
+    // 创建新的shape和strides
+    std::vector<int64_t> new_shape(shape_.size());
+    std::vector<int64_t> new_strides(strides_.size());
+    
+    for (size_t i = 0; i < dims.size(); ++i) {
+        int dim = dims[i];
+        if (dim < 0) dim += dims.size();
+        new_shape[i] = shape_[dim];
+        new_strides[i] = strides_[dim];
+    }
+    
+    // Transpose通常会破坏连续性
+    return Tensor(data_, new_shape, new_strides, offset_, false);
+}
+
+Tensor Tensor::transpose() const {
+    std::vector<int> dims(shape_.size());
+    for (size_t i = 0; i < shape_.size(); ++i) {
+        dims[i] = shape_.size() - 1 - i;
+    }
+    return transpose(dims);
+}
+
+Tensor Tensor::squeeze(int dim) const {
+    std::vector<int64_t> new_shape;
+    std::vector<int64_t> new_strides;
+    
+    if (dim == -1) {
+        // 移除所有大小为1的维度
+        for (size_t i = 0; i < shape_.size(); ++i) {
+            if (shape_[i] != 1) {
+                new_shape.push_back(shape_[i]);
+                new_strides.push_back(strides_[i]);
+            }
+        }
+    } else {
+        // 移除指定维度
+        if (dim < 0) dim += shape_.size();
+        if (dim < 0 || dim >= static_cast<int>(shape_.size())) {
+            throw std::runtime_error("Dimension out of range");
+        }
+        if (shape_[dim] != 1) {
+            throw std::runtime_error("Cannot squeeze dimension with size != 1");
+        }
+        
+        for (size_t i = 0; i < shape_.size(); ++i) {
+            if (static_cast<int>(i) != dim) {
+                new_shape.push_back(shape_[i]);
+                new_strides.push_back(strides_[i]);
+            }
+        }
+    }
+    
+    if (new_shape.empty()) {
+        new_shape.push_back(1);
+        new_strides.push_back(1);
+    }
+    
+    return Tensor(data_, new_shape, new_strides, offset_, contiguous_);
+}
+
+Tensor Tensor::unsqueeze(int dim) const {
+    int ndim = shape_.size();
+    if (dim < 0) dim += ndim + 1;
+    if (dim < 0 || dim > ndim) {
+        throw std::runtime_error("Dimension out of range");
+    }
+    
+    std::vector<int64_t> new_shape = shape_;
+    std::vector<int64_t> new_strides = strides_;
+    
+    new_shape.insert(new_shape.begin() + dim, 1);
+    // 新维度的stride可以是任意值（因为大小为1），我们使用相邻维度的stride
+    int64_t new_stride = (dim < ndim) ? strides_[dim] : 1;
+    new_strides.insert(new_strides.begin() + dim, new_stride);
+    
+    return Tensor(data_, new_shape, new_strides, offset_, contiguous_);
+}
+
+// ========== Level 2: 数学运算 ==========
+// Element-wise加法
+Tensor Tensor::add(const Tensor& other) const {
+    if (shape_ != other.shape_) {
+        throw std::runtime_error("Shape mismatch for element-wise operation");
+    }
+    
+    std::vector<float> result_data(compute_size());
+    const float* data1 = data();
+    const float* data2 = other.data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = data1[i] + data2[i];
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::add(float scalar) const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = src[i] + scalar;
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::sub(const Tensor& other) const {
+    if (shape_ != other.shape_) {
+        throw std::runtime_error("Shape mismatch for element-wise operation");
+    }
+    
+    std::vector<float> result_data(compute_size());
+    const float* data1 = data();
+    const float* data2 = other.data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = data1[i] - data2[i];
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::sub(float scalar) const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = src[i] - scalar;
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::mul(const Tensor& other) const {
+    if (shape_ != other.shape_) {
+        throw std::runtime_error("Shape mismatch for element-wise operation");
+    }
+    
+    std::vector<float> result_data(compute_size());
+    const float* data1 = data();
+    const float* data2 = other.data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = data1[i] * data2[i];
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::mul(float scalar) const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = src[i] * scalar;
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::div(const Tensor& other) const {
+    if (shape_ != other.shape_) {
+        throw std::runtime_error("Shape mismatch for element-wise operation");
+    }
+    
+    std::vector<float> result_data(compute_size());
+    const float* data1 = data();
+    const float* data2 = other.data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        if (std::abs(data2[i]) < 1e-7f) {
+            throw std::runtime_error("Division by zero");
+        }
+        result_data[i] = data1[i] / data2[i];
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::div(float scalar) const {
+    if (std::abs(scalar) < 1e-7f) {
+        throw std::runtime_error("Division by zero");
+    }
+    
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    float inv_scalar = 1.0f / scalar;
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = src[i] * inv_scalar;
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+// Activation函数
+Tensor Tensor::sigmoid() const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = 1.0f / (1.0f + std::exp(-src[i]));
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::softmax(int axis) const {
+    int ax = axis;
+    if (ax < 0) ax += shape_.size();
+    if (ax < 0 || ax >= static_cast<int>(shape_.size())) {
+        throw std::runtime_error("Axis out of range");
+    }
+    
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    // 简化实现：仅支持最后一维的softmax
+    if (ax != static_cast<int>(shape_.size()) - 1) {
+        throw std::runtime_error("Softmax only supports last axis for now");
+    }
+    
+    int64_t outer_size = 1;
+    for (int i = 0; i < ax; ++i) {
+        outer_size *= shape_[i];
+    }
+    int64_t inner_size = shape_[ax];
+    
+    for (int64_t i = 0; i < outer_size; ++i) {
+        const float* row = src + i * inner_size;
+        float* out_row = result_data.data() + i * inner_size;
+        
+        // 找到最大值（数值稳定性）
+        float max_val = row[0];
+        for (int64_t j = 1; j < inner_size; ++j) {
+            max_val = std::max(max_val, row[j]);
+        }
+        
+        // exp和sum
+        float sum = 0.0f;
+        for (int64_t j = 0; j < inner_size; ++j) {
+            out_row[j] = std::exp(row[j] - max_val);
+            sum += out_row[j];
+        }
+        
+        // 归一化
+        float inv_sum = 1.0f / sum;
+        for (int64_t j = 0; j < inner_size; ++j) {
+            out_row[j] *= inv_sum;
+        }
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::exp_() const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = std::exp(src[i]);
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::log_() const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        if (src[i] <= 0.0f) {
+            throw std::runtime_error("Log of non-positive value");
+        }
+        result_data[i] = std::log(src[i]);
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+// 比较操作
+Tensor Tensor::gt(float threshold) const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = (src[i] > threshold) ? 1.0f : 0.0f;
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::lt(float threshold) const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = (src[i] < threshold) ? 1.0f : 0.0f;
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::ge(float threshold) const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = (src[i] >= threshold) ? 1.0f : 0.0f;
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::le(float threshold) const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = (src[i] <= threshold) ? 1.0f : 0.0f;
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+Tensor Tensor::eq(float threshold) const {
+    std::vector<float> result_data(compute_size());
+    const float* src = data();
+    
+    for (int64_t i = 0; i < compute_size(); ++i) {
+        result_data[i] = (std::abs(src[i] - threshold) < 1e-6f) ? 1.0f : 0.0f;
+    }
+    
+    return Tensor(std::move(result_data), shape_);
+}
+
+// Reduction操作
+Tensor Tensor::sum(int axis, bool keepdims) const {
+    if (axis == -1) {
+        // 对所有元素求和
+        float total = 0.0f;
+        const float* src = data();
+        for (int64_t i = 0; i < compute_size(); ++i) {
+            total += src[i];
+        }
+        
+        if (keepdims) {
+            std::vector<int64_t> new_shape(shape_.size(), 1);
+            return Tensor(std::vector<float>{total}, new_shape);
+        } else {
+            return Tensor(std::vector<float>{total}, {1});
+        }
+    }
+    
+    int ax = axis;
+    if (ax < 0) ax += shape_.size();
+    if (ax < 0 || ax >= static_cast<int>(shape_.size())) {
+        throw std::runtime_error("Axis out of range");
+    }
+    
+    // 计算新的shape
+    std::vector<int64_t> new_shape;
+    for (int i = 0; i < static_cast<int>(shape_.size()); ++i) {
+        if (i != ax) {
+            new_shape.push_back(shape_[i]);
+        } else if (keepdims) {
+            new_shape.push_back(1);
+        }
+    }
+    if (new_shape.empty()) new_shape.push_back(1);
+    
+    // 计算输出大小
+    int64_t outer_size = 1;
+    for (int i = 0; i < ax; ++i) {
+        outer_size *= shape_[i];
+    }
+    int64_t axis_size = shape_[ax];
+    int64_t inner_size = 1;
+    for (int i = ax + 1; i < static_cast<int>(shape_.size()); ++i) {
+        inner_size *= shape_[i];
+    }
+    
+    std::vector<float> result_data(outer_size * inner_size, 0.0f);
+    const float* src = data();
+    
+    for (int64_t i = 0; i < outer_size; ++i) {
+        for (int64_t j = 0; j < axis_size; ++j) {
+            for (int64_t k = 0; k < inner_size; ++k) {
+                int64_t src_idx = (i * axis_size + j) * inner_size + k;
+                int64_t dst_idx = i * inner_size + k;
+                result_data[dst_idx] += src[src_idx];
+            }
+        }
+    }
+    
+    return Tensor(std::move(result_data), new_shape);
+}
+
+Tensor Tensor::mean(int axis, bool keepdims) const {
+    Tensor sum_result = sum(axis, keepdims);
+    
+    int64_t count;
+    if (axis == -1) {
+        count = compute_size();
+    } else {
+        int ax = axis;
+        if (ax < 0) ax += shape_.size();
+        count = shape_[ax];
+    }
+    
+    return sum_result.div(static_cast<float>(count));
+}
+
+Tensor Tensor::max(int axis, bool keepdims) const {
+    if (axis == -1) {
+        // 对所有元素求max
+        const float* src = data();
+        float max_val = src[0];
+        for (int64_t i = 1; i < compute_size(); ++i) {
+            max_val = std::max(max_val, src[i]);
+        }
+        
+        if (keepdims) {
+            std::vector<int64_t> new_shape(shape_.size(), 1);
+            return Tensor(std::vector<float>{max_val}, new_shape);
+        } else {
+            return Tensor(std::vector<float>{max_val}, {1});
+        }
+    }
+    
+    int ax = axis;
+    if (ax < 0) ax += shape_.size();
+    if (ax < 0 || ax >= static_cast<int>(shape_.size())) {
+        throw std::runtime_error("Axis out of range");
+    }
+    
+    // 计算新的shape
+    std::vector<int64_t> new_shape;
+    for (int i = 0; i < static_cast<int>(shape_.size()); ++i) {
+        if (i != ax) {
+            new_shape.push_back(shape_[i]);
+        } else if (keepdims) {
+            new_shape.push_back(1);
+        }
+    }
+    if (new_shape.empty()) new_shape.push_back(1);
+    
+    // 计算尺寸
+    int64_t outer_size = 1;
+    for (int i = 0; i < ax; ++i) {
+        outer_size *= shape_[i];
+    }
+    int64_t axis_size = shape_[ax];
+    int64_t inner_size = 1;
+    for (int i = ax + 1; i < static_cast<int>(shape_.size()); ++i) {
+        inner_size *= shape_[i];
+    }
+    
+    std::vector<float> result_data(outer_size * inner_size);
+    const float* src = data();
+    
+    for (int64_t i = 0; i < outer_size; ++i) {
+        for (int64_t k = 0; k < inner_size; ++k) {
+            int64_t src_idx = (i * axis_size + 0) * inner_size + k;
+            float max_val = src[src_idx];
+            
+            for (int64_t j = 1; j < axis_size; ++j) {
+                src_idx = (i * axis_size + j) * inner_size + k;
+                max_val = std::max(max_val, src[src_idx]);
+            }
+            
+            int64_t dst_idx = i * inner_size + k;
+            result_data[dst_idx] = max_val;
+        }
+    }
+    
+    return Tensor(std::move(result_data), new_shape);
+}
+
+Tensor Tensor::min(int axis, bool keepdims) const {
+    if (axis == -1) {
+        const float* src = data();
+        float min_val = src[0];
+        for (int64_t i = 1; i < compute_size(); ++i) {
+            min_val = std::min(min_val, src[i]);
+        }
+        
+        if (keepdims) {
+            std::vector<int64_t> new_shape(shape_.size(), 1);
+            return Tensor(std::vector<float>{min_val}, new_shape);
+        } else {
+            return Tensor(std::vector<float>{min_val}, {1});
+        }
+    }
+    
+    int ax = axis;
+    if (ax < 0) ax += shape_.size();
+    if (ax < 0 || ax >= static_cast<int>(shape_.size())) {
+        throw std::runtime_error("Axis out of range");
+    }
+    
+    std::vector<int64_t> new_shape;
+    for (int i = 0; i < static_cast<int>(shape_.size()); ++i) {
+        if (i != ax) {
+            new_shape.push_back(shape_[i]);
+        } else if (keepdims) {
+            new_shape.push_back(1);
+        }
+    }
+    if (new_shape.empty()) new_shape.push_back(1);
+    
+    int64_t outer_size = 1;
+    for (int i = 0; i < ax; ++i) {
+        outer_size *= shape_[i];
+    }
+    int64_t axis_size = shape_[ax];
+    int64_t inner_size = 1;
+    for (int i = ax + 1; i < static_cast<int>(shape_.size()); ++i) {
+        inner_size *= shape_[i];
+    }
+    
+    std::vector<float> result_data(outer_size * inner_size);
+    const float* src = data();
+    
+    for (int64_t i = 0; i < outer_size; ++i) {
+        for (int64_t k = 0; k < inner_size; ++k) {
+            int64_t src_idx = (i * axis_size + 0) * inner_size + k;
+            float min_val = src[src_idx];
+            
+            for (int64_t j = 1; j < axis_size; ++j) {
+                src_idx = (i * axis_size + j) * inner_size + k;
+                min_val = std::min(min_val, src[src_idx]);
+            }
+            
+            int64_t dst_idx = i * inner_size + k;
+            result_data[dst_idx] = min_val;
+        }
+    }
+    
+    return Tensor(std::move(result_data), new_shape);
+}
+
+// Argmax/Argmin返回Lua表
+LuaIntf::LuaRef Tensor::argmax_lua(lua_State* L, int axis) const {
+    if (axis == -1) {
+        // 返回单个最大值的索引
+        const float* src = data();
+        int64_t max_idx = 0;
+        float max_val = src[0];
+        
+        for (int64_t i = 1; i < compute_size(); ++i) {
+            if (src[i] > max_val) {
+                max_val = src[i];
+                max_idx = i;
+            }
+        }
+        
+        return LuaIntf::LuaRef::fromValue(L, max_idx);
+    }
+    
+    int ax = axis;
+    if (ax < 0) ax += shape_.size();
+    if (ax < 0 || ax >= static_cast<int>(shape_.size())) {
+        throw std::runtime_error("Axis out of range");
+    }
+    
+    // 计算尺寸
+    int64_t outer_size = 1;
+    for (int i = 0; i < ax; ++i) {
+        outer_size *= shape_[i];
+    }
+    int64_t axis_size = shape_[ax];
+    int64_t inner_size = 1;
+    for (int i = ax + 1; i < static_cast<int>(shape_.size()); ++i) {
+        inner_size *= shape_[i];
+    }
+    
+    const float* src = data();
+    LuaIntf::LuaRef result = LuaIntf::LuaRef::createTable(L);
+    int lua_idx = 1;
+    
+    for (int64_t i = 0; i < outer_size; ++i) {
+        for (int64_t k = 0; k < inner_size; ++k) {
+            int64_t src_idx = (i * axis_size + 0) * inner_size + k;
+            float max_val = src[src_idx];
+            int64_t max_pos = 0;
+            
+            for (int64_t j = 1; j < axis_size; ++j) {
+                src_idx = (i * axis_size + j) * inner_size + k;
+                if (src[src_idx] > max_val) {
+                    max_val = src[src_idx];
+                    max_pos = j;
+                }
+            }
+            
+            result[lua_idx++] = max_pos;
+        }
+    }
+    
+    return result;
+}
+
+LuaIntf::LuaRef Tensor::argmin_lua(lua_State* L, int axis) const {
+    if (axis == -1) {
+        const float* src = data();
+        int64_t min_idx = 0;
+        float min_val = src[0];
+        
+        for (int64_t i = 1; i < compute_size(); ++i) {
+            if (src[i] < min_val) {
+                min_val = src[i];
+                min_idx = i;
+            }
+        }
+        
+        return LuaIntf::LuaRef::fromValue(L, min_idx);
+    }
+    
+    int ax = axis;
+    if (ax < 0) ax += shape_.size();
+    
+    int64_t outer_size = 1;
+    for (int i = 0; i < ax; ++i) {
+        outer_size *= shape_[i];
+    }
+    int64_t axis_size = shape_[ax];
+    int64_t inner_size = 1;
+    for (int i = ax + 1; i < static_cast<int>(shape_.size()); ++i) {
+        inner_size *= shape_[i];
+    }
+    
+    const float* src = data();
+    LuaIntf::LuaRef result = LuaIntf::LuaRef::createTable(L);
+    int lua_idx = 1;
+    
+    for (int64_t i = 0; i < outer_size; ++i) {
+        for (int64_t k = 0; k < inner_size; ++k) {
+            int64_t src_idx = (i * axis_size + 0) * inner_size + k;
+            float min_val = src[src_idx];
+            int64_t min_pos = 0;
+            
+            for (int64_t j = 1; j < axis_size; ++j) {
+                src_idx = (i * axis_size + j) * inner_size + k;
+                if (src[src_idx] < min_val) {
+                    min_val = src[src_idx];
+                    min_pos = j;
+                }
+            }
+            
+            result[lua_idx++] = min_pos;
+        }
+    }
+    
+    return result;
+}
+
+// ========== Level 3: 高级操作 ==========
+LuaIntf::LuaRef Tensor::topk_lua(lua_State* L, int k, int axis, bool largest) const {
+    // 简化实现：仅支持最后一维和axis=-1
+    if (axis != -1 && axis != static_cast<int>(shape_.size()) - 1) {
+        throw std::runtime_error("topk only supports last axis or axis=-1");
+    }
+    
+    if (shape_.empty()) {
+        throw std::runtime_error("Cannot apply topk to scalar");
+    }
+    
+    int64_t inner_size = shape_[shape_.size() - 1];
+    int64_t outer_size = compute_size() / inner_size;
+    
+    k = std::min(k, static_cast<int>(inner_size));
+    
+    const float* src = data();
+    
+    LuaIntf::LuaRef values = LuaIntf::LuaRef::createTable(L);
+    LuaIntf::LuaRef indices = LuaIntf::LuaRef::createTable(L);
+    
+    int lua_idx = 1;
+    for (int64_t i = 0; i < outer_size; ++i) {
+        const float* row = src + i * inner_size;
+        
+        // 创建索引值对
+        std::vector<std::pair<float, int64_t>> pairs(inner_size);
+        for (int64_t j = 0; j < inner_size; ++j) {
+            pairs[j] = {row[j], j};
+        }
+        
+        // 排序
+        if (largest) {
+            std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
+                [](const auto& a, const auto& b) { return a.first > b.first; });
+        } else {
+            std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+        }
+        
+        // 提取前k个
+        for (int j = 0; j < k; ++j) {
+            values[lua_idx] = pairs[j].first;
+            indices[lua_idx] = pairs[j].second;
+            ++lua_idx;
+        }
+    }
+    
+    LuaIntf::LuaRef result = LuaIntf::LuaRef::createTable(L);
+    result["values"] = values;
+    result["indices"] = indices;
+    return result;
+}
+
+// 辅助方法
+float Tensor::get_item(const std::vector<int64_t>& indices) const {
+    int64_t offset = compute_offset(indices);
+    return data_->at(offset);
+}
+
+void Tensor::set_item(const std::vector<int64_t>& indices, float value) {
+    int64_t offset = compute_offset(indices);
+    (*data_)[offset] = value;
+}
+
+std::string Tensor::to_string(int max_elements) const {
+    std::ostringstream oss;
+    oss << "Tensor(shape=[";
+    for (size_t i = 0; i < shape_.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << shape_[i];
+    }
+    oss << "], data=[";
+    
+    const float* src = data();
+    int64_t total = compute_size();
+    int64_t to_show = std::min(total, static_cast<int64_t>(max_elements));
+    
+    for (int64_t i = 0; i < to_show; ++i) {
+        if (i > 0) oss << ", ";
+        oss << src[i];
+    }
+    
+    if (to_show < total) {
+        oss << ", ...";
+    }
+    oss << "])";
+    
+    return oss.str();
+}
+
+LuaIntf::LuaRef Tensor::to_table(lua_State* L) const {
+    // 简化实现：仅支持1D和2D tensor
+    if (shape_.size() == 1) {
+        LuaIntf::LuaRef result = LuaIntf::LuaRef::createTable(L);
+        const float* src = data();
+        for (int64_t i = 0; i < shape_[0]; ++i) {
+            result[i + 1] = src[i];
+        }
+        return result;
+    } else if (shape_.size() == 2) {
+        LuaIntf::LuaRef result = LuaIntf::LuaRef::createTable(L);
+        const float* src = data();
+        for (int64_t i = 0; i < shape_[0]; ++i) {
+            LuaIntf::LuaRef row = LuaIntf::LuaRef::createTable(L);
+            for (int64_t j = 0; j < shape_[1]; ++j) {
+                row[j + 1] = src[i * shape_[1] + j];
+            }
+            result[i + 1] = row;
+        }
+        return result;
+    } else {
+        throw std::runtime_error("to_table only supports 1D and 2D tensors");
+    }
+}
+
+// ========== Legacy方法（保留向后兼容） ==========
 LuaIntf::LuaRef Tensor::filter_yolo(lua_State* L, float conf_thres) {
     if (shape_.size() != 3 || shape_[0] != 1) {
         throw std::runtime_error("Invalid YOLO output shape");
@@ -597,26 +1566,77 @@ void register_module(lua_State* L) {
                     const std::vector<float>&,
                     const std::vector<int64_t>&
                 ))
+                
+                // 属性
                 .addProperty("ndim", &Tensor::ndim)
                 .addFunction("shape", &Tensor::shape)
+                .addFunction("strides", &Tensor::strides)
+                .addFunction("size", static_cast<int64_t(Tensor::*)() const>(&Tensor::size))
+                .addFunction("is_contiguous", &Tensor::is_contiguous)
                 .addFunction("view", &Tensor::view)
+                
+                // Level 1: 基础形状操作
+                .addFunction("slice", &Tensor::slice)
+                .addFunction("reshape", &Tensor::reshape)
+                .addFunction("transpose", 
+                    static_cast<Tensor(Tensor::*)() const>(&Tensor::transpose))
+                .addFunction("transpose_dims",
+                    static_cast<Tensor(Tensor::*)(const std::vector<int>&) const>(&Tensor::transpose))
+                .addFunction("squeeze", &Tensor::squeeze)
+                .addFunction("unsqueeze", &Tensor::unsqueeze)
+                
+                // Level 2: 数学运算
+                .addFunction("add", static_cast<Tensor(Tensor::*)(float) const>(&Tensor::add))
+                .addFunction("add_tensor", static_cast<Tensor(Tensor::*)(const Tensor&) const>(&Tensor::add))
+                .addFunction("sub", static_cast<Tensor(Tensor::*)(float) const>(&Tensor::sub))
+                .addFunction("sub_tensor", static_cast<Tensor(Tensor::*)(const Tensor&) const>(&Tensor::sub))
+                .addFunction("mul", static_cast<Tensor(Tensor::*)(float) const>(&Tensor::mul))
+                .addFunction("mul_tensor", static_cast<Tensor(Tensor::*)(const Tensor&) const>(&Tensor::mul))
+                .addFunction("div", static_cast<Tensor(Tensor::*)(float) const>(&Tensor::div))
+                .addFunction("div_tensor", static_cast<Tensor(Tensor::*)(const Tensor&) const>(&Tensor::div))
+                
+                .addFunction("sum", &Tensor::sum)
+                .addFunction("mean", &Tensor::mean)
+                .addFunction("max", &Tensor::max)
+                .addFunction("min", &Tensor::min)
+                .addFunction("argmax", &Tensor::argmax_lua)
+                .addFunction("argmin", &Tensor::argmin_lua)
+                
+                .addFunction("sigmoid", &Tensor::sigmoid)
+                .addFunction("softmax", &Tensor::softmax)
+                .addFunction("exp", &Tensor::exp_)
+                .addFunction("log", &Tensor::log_)
+                
+                .addFunction("gt", &Tensor::gt)
+                .addFunction("lt", &Tensor::lt)
+                .addFunction("ge", &Tensor::ge)
+                .addFunction("le", &Tensor::le)
+                .addFunction("eq", &Tensor::eq)
+                
+                // Level 3: 高级操作
+                .addFunction("topk_new", &Tensor::topk_lua)
+                .addFunction("to_table", &Tensor::to_table)
+                .addFunction("to_string", &Tensor::to_string)
+                .addFunction("get", &Tensor::get_item)
+                .addFunction("set", &Tensor::set_item)
+                
+                // Legacy方法（向后兼容）
                 .addFunction("filter_yolo", &Tensor::filter_yolo)
                 .addFunction("filter_yolo_pose", &Tensor::filter_yolo_pose)
                 .addFunction("filter_yolo_seg", &Tensor::filter_yolo_seg)
                 .addFunction("process_mask", &Tensor::process_mask)
-                .addFunction("argmax", &Tensor::argmax)
+                .addFunction("argmax_old", &Tensor::argmax)
                 .addFunction("topk", &Tensor::topk)
+                
+                // Metamethods
                 .addMetaFunction("__len", [](const Tensor* t) { return t->size(); })
                 .addMetaFunction("__tostring", [](const Tensor* t) {
-                    auto s = t->shape();
-                    std::string shape_str = "[";
-                    for (size_t i = 0; i < s.size(); ++i) {
-                        if (i > 0) shape_str += ", ";
-                        shape_str += std::to_string(s[i]);
-                    }
-                    shape_str += "]";
-                    return "Tensor(" + shape_str + ")";
+                    return t->to_string(10);
                 })
+                .addMetaFunction("__add", [](Tensor& t, float scalar) { return t.add(scalar); })
+                .addMetaFunction("__sub", [](Tensor& t, float scalar) { return t.sub(scalar); })
+                .addMetaFunction("__mul", [](Tensor& t, float scalar) { return t.mul(scalar); })
+                .addMetaFunction("__div", [](Tensor& t, float scalar) { return t.div(scalar); })
             .endClass()
             
             // TensorView绑定
