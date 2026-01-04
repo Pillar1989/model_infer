@@ -81,7 +81,7 @@ Comparison between Lua-scripted engine (`model_infer`) and pure C++ implementati
 | **Inference Time** (Real) | ~270 ms | ~240 ms | C++ is ~11% faster |
 | **Memory Usage** (RSS) | ~150 MB | ~145 MB | C++ uses ~5 MB less |
 
-*Note: Tested on Linux x64. "Inference Time" includes initialization, image loading, preprocessing, inference, and postprocessing.*
+*Note: Tested on Linux x64 AMD Ryzen 9 3900X 12-Core Processor. "Inference Time" includes initialization, image loading, preprocessing, inference, and postprocessing.*
 
 ## �📂 Project Structure
 
