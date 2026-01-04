@@ -32,7 +32,10 @@ public:
     
     // Mask处理
     LuaIntf::LuaRef process_mask(lua_State* L, const LuaIntf::LuaRef& mask_coeffs, 
-                                      const LuaIntf::LuaRef& box, int img_w, int img_h);
+                                      const LuaIntf::LuaRef& box, 
+                                      int img_w, int img_h,
+                                      int input_w, int input_h,
+                                      int pad_x, int pad_y);
     
     // 通用方法（为其他任务扩展）
     LuaIntf::LuaRef argmax(lua_State* L);

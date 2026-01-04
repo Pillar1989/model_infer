@@ -350,7 +350,10 @@ LuaIntf::LuaRef Tensor::filter_yolo_seg(lua_State* L, float conf_thres) {
 }
 
 LuaIntf::LuaRef Tensor::process_mask(lua_State* L, const LuaIntf::LuaRef& mask_coeffs, 
-                                   const LuaIntf::LuaRef& box, int img_w, int img_h) {
+                                   const LuaIntf::LuaRef& box, 
+                                   int img_w, int img_h,
+                                   int input_w, int input_h,
+                                   int pad_x, int pad_y) {
     const Tensor& proto = *this;
     // proto: [1, 32, 160, 160]
     // mask_coeffs: [32]
@@ -365,8 +368,6 @@ LuaIntf::LuaRef Tensor::process_mask(lua_State* L, const LuaIntf::LuaRef& mask_c
     int num_masks = 32;
     
     // 1. Matrix Multiplication: Mask = Coeffs * Proto
-    // Coeffs: 1x32, Proto: 32x(160*160) -> 1x(160*160)
-    
     cv::Mat proto_mat(num_masks, mh * mw, CV_32F, (void*)proto.raw_data());
     cv::Mat coeffs_mat(1, num_masks, CV_32F);
     
@@ -381,51 +382,48 @@ LuaIntf::LuaRef Tensor::process_mask(lua_State* L, const LuaIntf::LuaRef& mask_c
     cv::exp(-mask, mask);
     mask = 1.0f / (1.0f + mask);
     
-    // 3. Resize to original image size
-    // Note: The mask is defined on the letterboxed image, not the original image directly.
-    // But here we are given img_w, img_h which are likely the original image dimensions.
-    // However, the box is also in original coordinates (if post-processed).
-    // Wait, usually we process mask on the letterboxed scale (e.g. 640x640) then crop to box, then resize to original box.
-    // Or resize mask to 640x640, then crop/resize to original.
+    // 3. Resize to Input Size (e.g. 640x640)
+    cv::Mat mask_input;
+    cv::resize(mask, mask_input, cv::Size(input_w, input_h), 0, 0, cv::INTER_LINEAR);
     
-    // Let's assume we resize the 160x160 mask to img_w x img_h directly (simple approach)
-    // But correct approach is:
-    // 1. Resize 160x160 -> 640x640 (input size)
-    // 2. Crop to the box (in 640x640 coords)
-    // 3. Resize to box size (in original coords)
-    // OR:
-    // 1. Resize 160x160 -> img_w x img_h
-    // 2. Threshold
-    // 3. Crop by box
+    // 4. Crop Padding (Remove letterbox padding)
+    // ROI: [pad_x, pad_y, input_w - 2*pad_x, input_h - 2*pad_y]
+    // Ensure ROI is within bounds
+    int roi_w = input_w - 2 * pad_x;
+    int roi_h = input_h - 2 * pad_y;
     
-    // Let's take a simpler approach often used:
-    // Resize mask to img_w x img_h
-    cv::Mat resized_mask;
-    cv::resize(mask, resized_mask, cv::Size(img_w, img_h), 0, 0, cv::INTER_LINEAR);
+    cv::Rect roi(pad_x, pad_y, roi_w, roi_h);
+    roi = roi & cv::Rect(0, 0, input_w, input_h);
     
-    // 4. Crop by box (set pixels outside box to 0)
-    float x = box.get<float>("x");
-    float y = box.get<float>("y");
-    float w = box.get<float>("w");
-    float h = box.get<float>("h");
-    
-    cv::Rect roi(x, y, w, h);
-    // Clip ROI
-    roi = roi & cv::Rect(0, 0, img_w, img_h);
-    
-    cv::Mat final_mask = cv::Mat::zeros(img_h, img_w, CV_32F);
-    if (roi.area() > 0) {
-        resized_mask(roi).copyTo(final_mask(roi));
+    if (roi.area() == 0) {
+         return LuaIntf::LuaRef::fromValue(L, Tensor(std::vector<float>(img_w * img_h, 0), {1, (int64_t)img_h, (int64_t)img_w}));
     }
     
-    // 5. Threshold (> 0.5)
+    cv::Mat mask_cropped = mask_input(roi);
+    
+    // 5. Resize to Original Image Size
+    cv::Mat mask_original;
+    cv::resize(mask_cropped, mask_original, cv::Size(img_w, img_h), 0, 0, cv::INTER_LINEAR);
+    
+    // 6. Crop by Box (set pixels outside box to 0)
+    float bx = box.get<float>("x");
+    float by = box.get<float>("y");
+    float bw = box.get<float>("w");
+    float bh = box.get<float>("h");
+    
+    cv::Rect box_rect(bx, by, bw, bh);
+    box_rect = box_rect & cv::Rect(0, 0, img_w, img_h);
+    
+    cv::Mat final_mask = cv::Mat::zeros(img_h, img_w, CV_32F);
+    if (box_rect.area() > 0) {
+        mask_original(box_rect).copyTo(final_mask(box_rect));
+    }
+    
+    // 7. Threshold (> 0.5)
     cv::threshold(final_mask, final_mask, 0.5, 1.0, cv::THRESH_BINARY);
     
-    // Return as vector<float> or similar?
-    // Let's return a Tensor (1xHxW)
+    // Return as Tensor
     std::vector<float> mask_data(img_w * img_h);
-    // Copy data (ensure float)
-    // final_mask is CV_32F
     std::memcpy(mask_data.data(), final_mask.data, img_w * img_h * sizeof(float));
     
     return LuaIntf::LuaRef::fromValue(L, Tensor(std::move(mask_data), {1, (int64_t)img_h, (int64_t)img_w}));

@@ -4,3 +4,5 @@ models/
 *.log
 .vscode/
 .DS_Store
+lua-intf/tests/phase2_cli
+lua-intf/tests/test_cli

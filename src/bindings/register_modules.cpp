@@ -7,3 +7,4 @@ void register_all_modules(lua_State* L) {
     lua_nn::register_module(L);
     lua_utils::register_module(L);
 }
+
