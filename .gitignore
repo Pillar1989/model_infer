@@ -1,0 +1,6 @@
+build/
+onnxruntime-prebuilt/
+models/
+*.log
+.vscode/
+.DS_Store
