@@ -51,7 +51,9 @@ function Model.preprocess(img)
         pad_x = left,
         pad_y = top,
         ori_w = w,
-        ori_h = h
+        ori_h = h,
+        input_w = img.width,
+        input_h = img.height
     }
 
     return input_tensor, meta
@@ -92,8 +94,8 @@ function Model.postprocess(outputs, meta)
     for i = 1, #final_boxes do
         local box = final_boxes[i]
         -- Generate mask using C++ helper
-        -- Note: We pass the original image size to get a mask of that size
-        local mask_tensor = output1:process_mask(box.mask_coeffs, box, meta.ori_w, meta.ori_h)
+        -- Note: We pass the actual input tensor size (which might be different from config due to stride alignment)
+        local mask_tensor = output1:process_mask(box.mask_coeffs, box, meta.ori_w, meta.ori_h, meta.input_w, meta.input_h, meta.pad_x, meta.pad_y)
         box.mask = mask_tensor
         box.mask_coeffs = nil -- Clean up
     end
