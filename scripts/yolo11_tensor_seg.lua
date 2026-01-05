@@ -64,78 +64,72 @@ function Model.preprocess(img)
     return input_tensor, meta
 end
 
--- 使用通用Tensor操作实现分割后处理
+-- 使用向量化Tensor操作实现分割后处理（方案3 - 极致性能）
 function Model.postprocess(outputs, meta)
     local output0 = outputs["output0"]  -- [1, 116, 8400]: boxes + 32 mask coeffs
     local output1 = outputs["output1"]  -- [1, 32, 160, 160]: proto masks
-    
-    if not output0 or not output1 then 
-        error("Missing outputs") 
+
+    if not output0 or not output1 then
+        error("Missing outputs")
     end
 
     -- YOLO11-Seg格式: output0=[1, 116, 8400], output1=[1, 32, 160, 160]
-    -- 直接使用已知格式
-    local num_boxes = 8400
     local num_mask_coeffs = 32
     local num_classes = 80
-    
+
     -- 1. 分离boxes, scores, mask_coeffs
-    -- boxes: [4, 8400]
-    local boxes = output0:slice(1, 0, 4, 1):squeeze(0)
-    
-    -- scores: [80, 8400]
-    local scores = output0:slice(1, 4, 4 + num_classes, 1):squeeze(0)
-    
-    -- mask_coeffs: [32, 8400]
-    local mask_coeffs = output0:slice(1, 4 + num_classes, 116, 1):squeeze(0)
-    
+    local boxes = output0:slice(1, 0, 4, 1):squeeze(0)  -- [4, 8400]
+    local scores = output0:slice(1, 4, 4 + num_classes, 1):squeeze(0)  -- [80, 8400]
+    local mask_coeffs = output0:slice(1, 4 + num_classes, 116, 1):squeeze(0)  -- [32, 8400]
+
     -- 2. 找到最大分数和类别
     local max_scores = scores:max(0, false)  -- [8400]
     local class_ids = scores:argmax(0)  -- Lua table [8400]
-    
-    -- 3. 转为table进行过滤
-    local boxes_table = boxes:to_table()
-    local max_scores_table = max_scores:to_table()
-    -- class_ids已经是table
-    local mask_coeffs_table = mask_coeffs:to_table()
-    
-    local proposals = {}
-    local actual_num_boxes = #max_scores_table
-    
-    for i = 1, actual_num_boxes do
-        local conf = max_scores_table[i]
-        
-        if conf >= Model.config.conf_thres then
-            local cx = boxes_table[1][i]
-            local cy = boxes_table[2][i]
-            local w = boxes_table[3][i]
-            local h = boxes_table[4][i]
-            local cls_id = class_ids[i]
-            
-            -- 将中心点坐标转换为左上角坐标
-            local x = cx - w / 2.0
-            local y = cy - h / 2.0
-            
-            -- 提取该box的32个mask系数
-            local coeffs = {}
-            for j = 1, num_mask_coeffs do
-                coeffs[j] = mask_coeffs_table[j][i]
-            end
-            
-            table.insert(proposals, {
-                x = x,
-                y = y,
-                w = w,
-                h = h,
-                score = conf,
-                class_id = cls_id,
-                label = Model.config.labels[cls_id + 1] or "unknown",
-                mask_coeffs = coeffs
-            })
-        end
+
+    -- 3. 向量化过滤：找出满足条件的索引
+    local valid_indices = max_scores:where_indices(Model.config.conf_thres, "ge")
+
+    print(string.format("过滤后候选框: %d", #valid_indices))
+
+    if #valid_indices == 0 then
+        return {}
     end
-    
-    print(string.format("过滤后候选框: %d", #proposals))
+
+    -- 4. 批量提取有效数据
+    local filtered_boxes = boxes:extract_columns(valid_indices)  -- {{cx,cy,w,h}, ...}
+    local filtered_scores_tensor = max_scores:index_select(0, valid_indices)
+    local filtered_scores = filtered_scores_tensor:to_table()
+    local filtered_mask_coeffs = mask_coeffs:extract_columns(valid_indices)  -- {{coeff1, ...coeff32}, ...}
+
+    local proposals = {}
+
+    -- 5. 只遍历过滤后的小数据集
+    for i = 1, #valid_indices do
+        local idx = valid_indices[i]
+        local box_data = filtered_boxes[i]
+        local coeffs = filtered_mask_coeffs[i]  -- 直接获取32个系数
+
+        local cx = box_data[1]
+        local cy = box_data[2]
+        local w = box_data[3]
+        local h = box_data[4]
+        local cls_id = class_ids[idx + 1]  -- Lua索引从1开始
+
+        -- 将中心点坐标转换为左上角坐标
+        local x = cx - w / 2.0
+        local y = cy - h / 2.0
+
+        table.insert(proposals, {
+            x = x,
+            y = y,
+            w = w,
+            h = h,
+            score = filtered_scores[i],
+            class_id = cls_id,
+            label = Model.config.labels[cls_id + 1] or "unknown",
+            mask_coeffs = coeffs
+        })
+    end
     
     -- 4. 坐标还原
     for _, box in ipairs(proposals) do
