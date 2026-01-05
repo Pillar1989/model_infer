@@ -62,72 +62,81 @@ function Model.preprocess(img)
     return input_tensor, meta
 end
 
--- 使用通用Tensor操作实现YOLOv5后处理
+-- 使用向量化Tensor操作实现YOLOv5后处理（方案3 - 极致性能）
 function Model.postprocess(outputs, meta)
     local output = outputs["output0"]
-    
-    if not output then 
-        error("Missing output0") 
+
+    if not output then
+        error("Missing output0")
     end
 
-    -- YOLOv5格式: [1, 25200, 85]
-    -- 85 = 4(xywh) + 1(objectness) + 80(classes)
+    -- YOLOv5格式: [1, 25200, 85] = [batch, num_boxes, 4_coords + 1_obj + 80_classes]
     -- 先squeeze掉batch维度 -> [25200, 85]
     local data = output:squeeze(0)
-    
-    -- 使用实际长度
-    local data_table = data:to_table()
-    local actual_num_boxes = #data_table
-    
+
+    -- 1. 提取不同部分（沿axis=1切片）
+    local boxes = data:slice(1, 0, 4, 1)        -- [25200, 4]
+    local objectness = data:slice(1, 4, 5, 1):squeeze(1)  -- [25200]
+    local class_scores = data:slice(1, 5, 85, 1)  -- [25200, 80]
+
+    -- 2. 预先用objectness过滤（第一轮过滤）
+    local obj_valid_indices = objectness:where_indices(Model.config.conf_thres, "ge")
+
+    if #obj_valid_indices == 0 then
+        print("过滤后候选框: 0")
+        return {}
+    end
+
+    -- 3. 只对通过objectness过滤的boxes进行类别分析
+    local filtered_boxes_tensor = boxes:index_select(0, obj_valid_indices)  -- [M, 4]
+    local filtered_obj_tensor = objectness:index_select(0, obj_valid_indices)  -- [M]
+    local filtered_class_scores = class_scores:index_select(0, obj_valid_indices)  -- [M, 80]
+
+    -- 4. 找到每个box的最大类别分数
+    local max_class_scores = filtered_class_scores:max(1, false)  -- [M] 沿类别维度取最大值
+    local class_ids = filtered_class_scores:argmax(1)  -- Lua table [M]
+
+    -- 5. 计算最终分数（objectness * class_score），再次过滤
+    local final_scores_tensor = filtered_obj_tensor:mul_tensor(max_class_scores)  -- [M]
+    local final_valid_indices = final_scores_tensor:where_indices(Model.config.conf_thres, "ge")
+
+    print(string.format("过滤后候选框: %d", #final_valid_indices))
+
+    if #final_valid_indices == 0 then
+        return {}
+    end
+
+    -- 6. 最终数据提取（数据量已经很小）
+    local final_boxes = filtered_boxes_tensor:index_select(0, final_valid_indices):to_table()
+    local final_scores = final_scores_tensor:index_select(0, final_valid_indices):to_table()
+
     local proposals = {}
-    
-    -- 遍历每个box
-    for i = 1, actual_num_boxes do
-        local box_data = data_table[i]
-        
-        -- 提取坐标和objectness
+
+    -- 7. 构建proposals
+    for i = 1, #final_valid_indices do
+        local box_data = final_boxes[i]
+        local idx = final_valid_indices[i]
+
         local cx = box_data[1]
         local cy = box_data[2]
         local w = box_data[3]
         local h = box_data[4]
-        local objectness = box_data[5]
-        
-        -- 预先过滤objectness
-        if objectness >= Model.config.conf_thres then
-            -- 找到最大类别分数
-            local max_class_score = box_data[6]
-            local max_class_id = 0
-            
-            for c = 1, 79 do  -- 剩余79个类别
-                local score = box_data[5 + c + 1]
-                if score > max_class_score then
-                    max_class_score = score
-                    max_class_id = c
-                end
-            end
-            
-            -- 计算最终分数 = objectness * class_score
-            local final_score = objectness * max_class_score
-            
-            if final_score >= Model.config.conf_thres then
-                -- 将中心点坐标转换为左上角坐标
-                local x = cx - w / 2.0
-                local y = cy - h / 2.0
-                
-                table.insert(proposals, {
-                    x = x,
-                    y = y,
-                    w = w,
-                    h = h,
-                    score = final_score,
-                    class_id = max_class_id,
-                    label = Model.config.labels[max_class_id + 1] or "unknown"
-                })
-            end
-        end
+        local cls_id = class_ids[idx + 1]  -- Lua索引从1开始
+
+        -- 将中心点坐标转换为左上角坐标
+        local x = cx - w / 2.0
+        local y = cy - h / 2.0
+
+        table.insert(proposals, {
+            x = x,
+            y = y,
+            w = w,
+            h = h,
+            score = final_scores[i],
+            class_id = cls_id,
+            label = Model.config.labels[cls_id + 1] or "unknown"
+        })
     end
-    
-    print(string.format("过滤后候选框: %d", #proposals))
     
     -- 坐标还原到原图
     for _, box in ipairs(proposals) do
