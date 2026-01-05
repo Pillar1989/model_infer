@@ -64,88 +64,82 @@ function Model.preprocess(img)
     return input_tensor, meta
 end
 
--- 使用通用Tensor操作实现姿态估计后处理
+-- 使用向量化Tensor操作实现姿态估计后处理（方案3 - 极致性能）
 function Model.postprocess(outputs, meta)
     local output = outputs["output0"]
-    
-    if not output then 
-        error("Missing output0") 
+
+    if not output then
+        error("Missing output0")
     end
 
     -- YOLO11-Pose格式: [1, 56, 8400]
     -- 4个box坐标 + 1个person类别分数 + 51个关键点数据(17个点*3: x,y,conf)
-    local num_boxes = 8400
     local num_kpt = Model.config.num_keypoints
-    
+
     -- 1. 分离boxes, scores, keypoints
-    -- boxes: [4, 8400]
-    local boxes = output:slice(1, 0, 4, 1):squeeze(0)
-    
-    -- person_scores: [8400]
-    local person_scores = output:slice(1, 4, 5, 1):squeeze(0):squeeze(0)
-    
-    -- keypoints: [51, 8400]
-    local keypoints = output:slice(1, 5, 56, 1):squeeze(0)
-    
-    -- 2. 转为table进行处理
-    local boxes_table = boxes:to_table()
-    local scores_table = person_scores:to_table()
-    local keypoints_table = keypoints:to_table()
-    
-    -- 获取实际的box数量
-    local actual_num_boxes = #scores_table
-    
-    local proposals = {}
-    
-    for i = 1, actual_num_boxes do
-        local conf = scores_table[i]
-        
-        if conf >= Model.config.conf_thres then
-            local cx = boxes_table[1][i]
-            local cy = boxes_table[2][i]
-            local w = boxes_table[3][i]
-            local h = boxes_table[4][i]
-            
-            -- 将中心点坐标转换为左上角坐标
-            local x = cx - w / 2.0
-            local y = cy - h / 2.0
-            
-            -- 提取17个关键点(每个3个值: x, y, conf)
-            local kpts = {}
-            for j = 1, num_kpt do
-                local idx_base = (j - 1) * 3
-                local kpt_x_idx = idx_base + 1
-                local kpt_y_idx = idx_base + 2
-                local kpt_c_idx = idx_base + 3
-                
-                -- 安全访问，防止nil
-                local kpt_x = keypoints_table[kpt_x_idx] and keypoints_table[kpt_x_idx][i] or 0
-                local kpt_y = keypoints_table[kpt_y_idx] and keypoints_table[kpt_y_idx][i] or 0
-                local kpt_c = keypoints_table[kpt_c_idx] and keypoints_table[kpt_c_idx][i] or 0
-                
-                kpts[j] = {
-                    x = kpt_x,
-                    y = kpt_y,
-                    v = kpt_c,  -- 使用'v'而不是'conf'，与main.cpp中的绘制代码一致
-                    conf = kpt_c,  -- 也保留conf以便调试
-                    name = Model.config.keypoint_names[j]
-                }
-            end
-            
-            table.insert(proposals, {
-                x = x,
-                y = y,
-                w = w,
-                h = h,
-                score = conf,
-                class_id = 0,  -- person类别
-                label = "person",
-                keypoints = kpts
-            })
-        end
+    local boxes = output:slice(1, 0, 4, 1):squeeze(0)  -- [4, 8400]
+    local person_scores = output:slice(1, 4, 5, 1):squeeze(0):squeeze(0)  -- [8400]
+    local keypoints = output:slice(1, 5, 56, 1):squeeze(0)  -- [51, 8400]
+
+    -- 2. 向量化过滤：找出满足条件的索引
+    local valid_indices = person_scores:where_indices(Model.config.conf_thres, "ge")
+
+    print(string.format("过滤后候选框: %d", #valid_indices))
+
+    if #valid_indices == 0 then
+        return {}
     end
-    
-    print(string.format("过滤后候选框: %d", #proposals))
+
+    -- 3. 批量提取有效数据
+    local filtered_boxes = boxes:extract_columns(valid_indices)  -- {{cx,cy,w,h}, ...}
+    local filtered_scores_tensor = person_scores:index_select(0, valid_indices)
+    local filtered_scores = filtered_scores_tensor:to_table()
+    local filtered_keypoints = keypoints:extract_columns(valid_indices)  -- {{kpt_data...}, ...}
+
+    local proposals = {}
+
+    -- 4. 只遍历过滤后的小数据集
+    for i = 1, #valid_indices do
+        local box_data = filtered_boxes[i]
+        local kpt_data = filtered_keypoints[i]
+
+        local cx = box_data[1]
+        local cy = box_data[2]
+        local w = box_data[3]
+        local h = box_data[4]
+
+        -- 将中心点坐标转换为左上角坐标
+        local x = cx - w / 2.0
+        local y = cy - h / 2.0
+
+        -- 提取17个关键点(每个3个值: x, y, conf)
+        local kpts = {}
+        for j = 1, num_kpt do
+            local idx_base = (j - 1) * 3
+            local kpt_x = kpt_data[idx_base + 1] or 0
+            local kpt_y = kpt_data[idx_base + 2] or 0
+            local kpt_c = kpt_data[idx_base + 3] or 0
+
+            kpts[j] = {
+                x = kpt_x,
+                y = kpt_y,
+                v = kpt_c,
+                conf = kpt_c,
+                name = Model.config.keypoint_names[j]
+            }
+        end
+
+        table.insert(proposals, {
+            x = x,
+            y = y,
+            w = w,
+            h = h,
+            score = filtered_scores[i],
+            class_id = 0,  -- person类别
+            label = "person",
+            keypoints = kpts
+        })
+    end
     
     -- 3. 坐标还原(包括关键点)
     for _, box in ipairs(proposals) do
