@@ -62,70 +62,71 @@ function Model.preprocess(img)
     return input_tensor, meta
 end
 
--- 使用通用Tensor操作实现YOLO后处理
+-- 使用向量化Tensor操作实现YOLO后处理（方案3 - 极致性能）
 function Model.postprocess(outputs, meta)
     local output = outputs["output0"]
-    
-    if not output then 
-        error("Missing output0") 
+
+    if not output then
+        error("Missing output0")
     end
 
     -- YOLO11格式: [1, 84, 8400]
     -- 前4个是box坐标(xywh), 后80个是类别分数
-    -- 直接使用已知格式，不依赖shape()方法
     local num_classes = 80
-    
+
     -- 1. 提取box坐标和类别分数
-    -- boxes: [1, 4, 8400] - 前4行
-    local boxes = output:slice(1, 0, 4, 1):squeeze(0)  -- squeeze掉batch维度 -> [4, 8400]
-    
-    -- scores: [1, 80, 8400] - 后80行
-    local scores = output:slice(1, 4, 84, 1):squeeze(0)  -- -> [80, 8400]
-    
+    local boxes = output:slice(1, 0, 4, 1):squeeze(0)  -- [4, 8400]
+    local scores = output:slice(1, 4, 84, 1):squeeze(0)  -- [80, 8400]
+
     -- 2. 对每个box找到最大分数和对应类别
-    -- max_scores: [8400], class_ids: Lua table [8400]
-    local max_scores = scores:max(0, false)  -- 沿类别维度取最大值，不保持维度
-    local class_ids = scores:argmax(0)  -- 获取最大值的索引，直接返回Lua table
-    
-    -- 3. 过滤低置信度的box
-    -- 转为table进行过滤(后续可优化为纯Tensor操作)
-    local boxes_table = boxes:to_table()  -- [4][N]
-    local max_scores_table = max_scores:to_table()  -- [N]
-    -- class_ids已经是table了
-    
-    -- 使用实际长度（考虑到不同输入尺寸可能产生不同数量的anchor）
-    local actual_num_boxes = #max_scores_table
-    
-    local proposals = {}
-    
-    for i = 1, actual_num_boxes do
-        -- 访问1D和2D table
-        local conf = max_scores_table[i]
-        
-        if conf >= Model.config.conf_thres then
-            local cx = boxes_table[1][i]
-            local cy = boxes_table[2][i]
-            local w = boxes_table[3][i]
-            local h = boxes_table[4][i]
-            local cls_id = class_ids[i]  -- class_ids已经是table
-            
-            -- 将中心点坐标转换为左上角坐标
-            local x = cx - w / 2.0
-            local y = cy - h / 2.0
-            
-            table.insert(proposals, {
-                x = x,
-                y = y,
-                w = w,
-                h = h,
-                score = conf,
-                class_id = cls_id,
-                label = Model.config.labels[cls_id + 1] or "unknown"
-            })
-        end
+    local max_scores = scores:max(0, false)  -- [8400]
+    local class_ids = scores:argmax(0)  -- Lua table [8400]
+
+    -- 3. 向量化过滤：找出满足条件的索引（关键优化！）
+    local valid_indices = max_scores:where_indices(Model.config.conf_thres, "ge")
+
+    print(string.format("过滤后候选框: %d", #valid_indices))
+
+    if #valid_indices == 0 then
+        return {}
     end
-    
-    print(string.format("过滤后候选框: %d", #proposals))
+
+    -- 4. 批量提取有效数据（避免大规模to_table转换）
+    -- 对于2D tensor [4, 8400]，提取指定列
+    local filtered_boxes = boxes:extract_columns(valid_indices)  -- {{cx,cy,w,h}, ...}
+
+    -- 对于1D tensor [8400]，使用index_select提取指定元素，然后转为table
+    local filtered_scores_tensor = max_scores:index_select(0, valid_indices)  -- [num_valid]
+    local filtered_scores = filtered_scores_tensor:to_table()  -- 现在数据量很小，转换快速
+
+    local proposals = {}
+
+    -- 5. 只遍历过滤后的小数据集（通常<100个）
+    for i = 1, #valid_indices do
+        local idx = valid_indices[i]
+        local box_data = filtered_boxes[i]
+
+        local cx = box_data[1]
+        local cy = box_data[2]
+        local w = box_data[3]
+        local h = box_data[4]
+        local cls_id = class_ids[idx + 1]  -- Lua索引从1开始（C++索引）
+        local conf = filtered_scores[i]  -- 使用过滤后的scores
+
+        -- 将中心点坐标转换为左上角坐标
+        local x = cx - w / 2.0
+        local y = cy - h / 2.0
+
+        table.insert(proposals, {
+            x = x,
+            y = y,
+            w = w,
+            h = h,
+            score = conf,
+            class_id = cls_id,
+            label = Model.config.labels[cls_id + 1] or "unknown"
+        })
+    end
     
     -- 4. 坐标还原到原图
     for _, box in ipairs(proposals) do
