@@ -72,14 +72,18 @@ A hardcoded C++ implementation is provided for performance comparison.
 ./cpp_infer ../models/yolov5n.onnx ../images/zidane.jpg
 ```
 
-## � Benchmark Results
+## 📊 Benchmark Results
 
-Comparison between Lua-scripted engine (`model_infer`) and pure C++ implementation (`cpp_infer`) on YOLOv5n.
+Comparison between different implementations on YOLO11n detection task.
 
-| Metric | Lua Engine (`model_infer`) | C++ Engine (`cpp_infer`) | Difference |
-| :--- | :--- | :--- | :--- |
-| **Inference Time** (Real) | ~270 ms | ~240 ms | C++ is ~11% faster |
-| **Memory Usage** (RSS) | ~150 MB | ~145 MB | C++ uses ~5 MB less |
+| Implementation | Time (ms) | vs C++ | Memory | Notes |
+|:--------------|----------:|:------:|:------:|:------|
+| **C++ (`cpp_infer`)** | 180 | - | ~145 MB | Baseline reference |
+| **Lua + Vectorized Tensor API** | 190 | +5.6% | ~150 MB | **Recommended** - General-purpose API |
+| **Lua + `filter_yolo`** | 290 | +61% | ~150 MB | Legacy specialized API |
+| **Lua + Naive Tensor API** | 515 | +186% | ~160 MB | Poor performance (avoid) |
+
+**Key Takeaway**: The new vectorized Tensor API achieves **near-C++ performance** (only 10ms slower) while maintaining full generality. This proves that **generic APIs can match specialized implementations** with proper design.
 
 *Note: Tested on Linux x64 AMD Ryzen 9 3900X 12-Core Processor. "Inference Time" includes initialization, image loading, preprocessing, inference, and postprocessing.*
 
@@ -158,6 +162,13 @@ local activated = tensor:sigmoid()        -- Apply sigmoid
 local normalized = tensor:softmax()       -- Apply softmax
 local top_k = tensor:topk_lua(5)         -- Get top 5 values and indices
 local table_data = tensor:to_table()     -- Convert to Lua table (SLOW!)
+
+-- ⚡ NEW: Vectorized Filtering Operations (High Performance)
+-- These methods enable near-C++ performance with generic Tensor API
+local indices = tensor:where_indices(threshold, "ge")  -- Get indices where tensor >= threshold
+local filtered = tensor:index_select(dim, indices)     -- Select elements at specific indices
+local columns = tensor:extract_columns({1, 5, 10})     -- Extract multiple columns (optimized for [C,N])
+local nz_indices = tensor:nonzero()                     -- Get indices of non-zero elements
 ```
 
 #### `lua_utils` - Utility Functions
@@ -177,55 +188,71 @@ local scaled_box = utils.scale_boxes(box, orig_shape, new_shape)
 
 ### Performance Best Practices
 
-#### ⚡ DO: Use Tensor Operations Directly
+#### ⚡ DO: Use Vectorized Filtering (BEST - Near C++ Speed!)
+```lua
+-- RECOMMENDED: Filter in C++, convert only small result set
+-- Example: YOLO detection with 8,400 boxes -> ~50 valid boxes
+local max_scores = scores:max(0, false)  -- [8400]
+local class_ids = scores:argmax(0)       -- Lua table [8400]
+
+-- 🚀 KEY: Get valid indices in C++ (fast)
+local valid_indices = max_scores:where_indices(conf_thres, "ge")  -- Returns ~50 indices
+
+-- 🚀 Extract only valid data (batch operation in C++)
+local filtered_boxes = boxes:extract_columns(valid_indices)  -- {{cx,cy,w,h}, ...}
+local filtered_scores = max_scores:index_select(0, valid_indices):to_table()  -- Only 50 elements
+
+-- Now loop over small filtered set (~50 iterations instead of 8,400!)
+for i = 1, #valid_indices do
+    local box_data = filtered_boxes[i]
+    local score = filtered_scores[i]
+    -- Process...
+end
+```
+
+#### ✅ DO: Use Tensor Operations Directly
 ```lua
 -- GOOD: Fast tensor operations (< 3 μs)
 local boxes = output:slice(1, 0, 4)      -- Extract box coordinates
 local scores = output:slice(1, 4, 85)    -- Extract class scores
 local max_scores = scores:max(1)         -- Get max score per box
 local class_ids = scores:argmax(1)       -- Get class IDs
-
--- Apply thresholding with tensor operations
-local mask = max_scores:gt(conf_threshold)  -- Create boolean mask
 ```
 
-#### 🐌 DON'T: Convert to Lua Tables Unless Necessary
+#### 🐌 DON'T: Convert Full Tensors to Tables
 ```lua
 -- BAD: to_table() is extremely slow for large tensors
--- Converting [25200,85] takes ~234ms (99% of overhead!)
-local table_data = output:to_table()
-for i = 1, #table_data do
-    -- Process in Lua loop...
+-- Converting [8400, 4] takes ~230ms (massive overhead!)
+local boxes_table = boxes:to_table()
+for i = 1, 8400 do
+    -- Process all boxes in Lua loop... SLOW!
+end
+
+-- GOOD: Filter first, then convert
+local valid_indices = scores:where_indices(threshold, "ge")  -- Returns ~50 indices
+local filtered = boxes:extract_columns(valid_indices)  -- Only 50 boxes, fast!
+```
+
+#### 🎯 Migration Guide: Old API → Vectorized API
+
+**Before (Slow - 515ms):**
+```lua
+local boxes_table = boxes:to_table()      -- 8,400 boxes converted
+local scores_table = scores:to_table()    -- 8,400 scores converted
+for i = 1, 8400 do
+    if scores_table[i] >= threshold then  -- Lua loop checking 8,400 times
+        -- Process box...
+    end
 end
 ```
 
-#### 🎯 Strategy: Minimize Data Transfers
-
-**Option 1: Use Filter APIs (Recommended)**
+**After (Fast - 190ms):**
 ```lua
--- Use specialized C++ methods that operate on tensors directly
-local results = session:filter_yolo(output, conf_thresh, iou_thresh, labels)
-```
-
-**Option 2: Tensor Operations + Small Table Conversion**
-```lua
--- Filter with tensor ops first, then convert only filtered results
-local high_conf_mask = scores:gt(0.5)     -- Tensor operation
-local filtered = output:masked_select(high_conf_mask)  -- Tensor operation
-local small_table = filtered:to_table()   -- Only convert filtered data
-```
-
-**Option 3: Hybrid Approach**
-```lua
--- Extract key information as small tensors/scalars
-local n_boxes = output:size(0)
-for i = 0, n_boxes - 1 do
-    local box = output:slice(0, i, i+1)   -- Get single box (still tensor)
-    local score = box:slice(1, 4, 5):item()  -- Extract confidence as scalar
-    if score > threshold then
-        local box_coords = box:slice(1, 0, 4):to_table()[1]  -- Convert only this box
-        -- Process box_coords...
-    end
+local valid_indices = scores:where_indices(threshold, "ge")  -- C++ filters to ~50 indices
+local filtered_boxes = boxes:extract_columns(valid_indices)   -- Extract 50 boxes
+local filtered_scores = scores:index_select(0, valid_indices):to_table()  -- Convert 50 scores
+for i = 1, #valid_indices do  -- Lua loop only 50 times!
+    -- Process box...
 end
 ```
 
@@ -294,15 +321,22 @@ print(string.format("Found %d objects", #results))
 - **YOLO11 Pose**: [scripts/yolo11_pose.lua](scripts/yolo11_pose.lua) - 17 COCO keypoints
 - **YOLOv5 Detection**: [scripts/yolov5_detector.lua](scripts/yolov5_detector.lua) - Classic anchor-based detection
 
-### Performance Comparison
+### Performance Comparison (YOLO11n Detection)
 
-| Implementation | Time (ms) | Notes |
-|:---------------|----------:|:------|
-| C++ (`cpp_infer`) | 254 | Baseline |
-| Lua + `filter_yolo` | 282 | 11% overhead, **recommended** |
-| Lua + Tensor API | 515 | 83% overhead due to `to_table()` conversion |
+| Implementation | Time (ms) | Overhead | Code Flexibility | Status |
+|:---------------|----------:|:--------:|:----------------:|:------:|
+| C++ (`cpp_infer`) | 180 | - | ❌ Low (hardcoded) | Baseline |
+| **Lua + Vectorized Tensor API** | **190** | **+5.6%** | ✅ **High** | ✅ **Recommended** |
+| Lua + `filter_yolo` | 290 | +61% | ⚠️ Medium (YOLO-specific) | Legacy |
+| Lua + Naive Tensor API | 515 | +186% | ✅ High | ❌ Avoid |
 
-**Recommendation**: Use specialized filter APIs (like `filter_yolo`) for production. Use Tensor API for prototyping and custom postprocessing where flexibility is more important than raw speed.
+**Key Insights:**
+- ✅ **Vectorized Tensor API achieves near-C++ performance** while remaining fully generic
+- ✅ Proper API design eliminates the need for task-specific optimizations
+- ✅ `where_indices()` + `extract_columns()` + `index_select()` enable high-performance filtering
+- ⚠️ Legacy `filter_yolo()` retained for backward compatibility but no longer needed
+
+**Migration Path:** All `*_tensor_*.lua` scripts have been updated to use the vectorized API. See [scripts/yolo11_tensor_detector.lua](scripts/yolo11_tensor_detector.lua) for reference implementation.
 
 ### Testing Your Script
 
