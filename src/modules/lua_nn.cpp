@@ -981,6 +981,144 @@ LuaIntf::LuaRef Tensor::to_table(lua_State* L) const {
     }
 }
 
+// ========== 向量化过滤操作（方案3 - 通用API） ==========
+// 返回非零元素的索引
+std::vector<int64_t> Tensor::nonzero() const {
+    std::vector<int64_t> indices;
+    const float* src = data();
+    int64_t total = compute_size();
+
+    indices.reserve(total / 10);  // 预分配，假设10%非零
+
+    for (int64_t i = 0; i < total; ++i) {
+        if (std::abs(src[i]) > 1e-7f) {
+            indices.push_back(i);
+        }
+    }
+
+    return indices;
+}
+
+// 返回满足条件的索引（核心优化：避免创建bool tensor）
+std::vector<int64_t> Tensor::where_indices(float threshold, const std::string& op) const {
+    std::vector<int64_t> indices;
+    const float* src = data();
+    int64_t total = compute_size();
+
+    indices.reserve(total / 10);  // 预分配
+
+    // 根据操作符进行过滤
+    if (op == "ge" || op == ">=") {
+        for (int64_t i = 0; i < total; ++i) {
+            if (src[i] >= threshold) indices.push_back(i);
+        }
+    } else if (op == "gt" || op == ">") {
+        for (int64_t i = 0; i < total; ++i) {
+            if (src[i] > threshold) indices.push_back(i);
+        }
+    } else if (op == "le" || op == "<=") {
+        for (int64_t i = 0; i < total; ++i) {
+            if (src[i] <= threshold) indices.push_back(i);
+        }
+    } else if (op == "lt" || op == "<") {
+        for (int64_t i = 0; i < total; ++i) {
+            if (src[i] < threshold) indices.push_back(i);
+        }
+    } else if (op == "eq" || op == "==") {
+        for (int64_t i = 0; i < total; ++i) {
+            if (std::abs(src[i] - threshold) < 1e-6f) indices.push_back(i);
+        }
+    } else {
+        throw std::runtime_error("Invalid operator: " + op);
+    }
+
+    return indices;
+}
+
+// 根据索引选择元素（批量gather）
+Tensor Tensor::index_select(int dim, const std::vector<int64_t>& indices) const {
+    if (indices.empty()) {
+        throw std::runtime_error("Empty indices for index_select");
+    }
+
+    // 标准化维度
+    int ax = dim;
+    if (ax < 0) ax += shape_.size();
+    if (ax < 0 || ax >= static_cast<int>(shape_.size())) {
+        throw std::runtime_error("Dimension out of range");
+    }
+
+    // 计算新的shape
+    std::vector<int64_t> new_shape = shape_;
+    new_shape[ax] = indices.size();
+
+    // 计算步长
+    int64_t outer_size = 1;
+    for (int i = 0; i < ax; ++i) {
+        outer_size *= shape_[i];
+    }
+
+    int64_t inner_size = 1;
+    for (int i = ax + 1; i < static_cast<int>(shape_.size()); ++i) {
+        inner_size *= shape_[i];
+    }
+
+    int64_t new_size = outer_size * indices.size() * inner_size;
+    std::vector<float> new_data(new_size);
+    const float* src = data();
+
+    // 批量复制数据
+    for (int64_t i = 0; i < outer_size; ++i) {
+        for (size_t j = 0; j < indices.size(); ++j) {
+            int64_t idx = indices[j];
+            if (idx < 0) idx += shape_[ax];
+            if (idx < 0 || idx >= shape_[ax]) {
+                throw std::runtime_error("Index out of range in index_select");
+            }
+
+            const float* src_ptr = src + (i * shape_[ax] + idx) * inner_size;
+            float* dst_ptr = new_data.data() + (i * indices.size() + j) * inner_size;
+            std::copy(src_ptr, src_ptr + inner_size, dst_ptr);
+        }
+    }
+
+    return Tensor(std::move(new_data), new_shape);
+}
+
+// 高效的多列提取（专为[C, N]格式优化，直接返回Lua table）
+LuaIntf::LuaRef Tensor::extract_columns(lua_State* L, const std::vector<int64_t>& col_indices) const {
+    if (shape_.size() != 2) {
+        throw std::runtime_error("extract_columns only supports 2D tensors");
+    }
+
+    if (col_indices.empty()) {
+        return LuaIntf::LuaRef::createTable(L);
+    }
+
+    int64_t num_rows = shape_[0];
+    int64_t num_cols = shape_[1];
+    const float* src = data();
+
+    // 创建结果表：result[col_idx] = {row_values...}
+    LuaIntf::LuaRef result = LuaIntf::LuaRef::createTable(L);
+
+    for (size_t i = 0; i < col_indices.size(); ++i) {
+        int64_t col = col_indices[i];
+        if (col < 0) col += num_cols;
+        if (col < 0 || col >= num_cols) {
+            throw std::runtime_error("Column index out of range");
+        }
+
+        LuaIntf::LuaRef col_data = LuaIntf::LuaRef::createTable(L);
+        for (int64_t row = 0; row < num_rows; ++row) {
+            col_data[row + 1] = src[row * num_cols + col];
+        }
+        result[i + 1] = col_data;
+    }
+
+    return result;
+}
+
 // ========== Legacy方法（保留向后兼容） ==========
 LuaIntf::LuaRef Tensor::filter_yolo(lua_State* L, float conf_thres) {
     if (shape_.size() != 3 || shape_[0] != 1) {
@@ -1619,7 +1757,13 @@ void register_module(lua_State* L) {
                 .addFunction("to_string", &Tensor::to_string)
                 .addFunction("get", &Tensor::get_item)
                 .addFunction("set", &Tensor::set_item)
-                
+
+                // 向量化过滤操作（方案3 - 通用API）
+                .addFunction("nonzero", &Tensor::nonzero)
+                .addFunction("where_indices", &Tensor::where_indices)
+                .addFunction("index_select", &Tensor::index_select)
+                .addFunction("extract_columns", &Tensor::extract_columns)
+
                 // Legacy方法（向后兼容）
                 .addFunction("filter_yolo", &Tensor::filter_yolo)
                 .addFunction("filter_yolo_pose", &Tensor::filter_yolo_pose)
