@@ -97,13 +97,24 @@ public:
     // ========== Level 3: 高级操作 ==========
     // TopK（返回{values, indices}的Lua table）
     LuaIntf::LuaRef topk_lua(lua_State* L, int k, int axis = -1, bool largest = true) const;
-    
+
     // Gather（根据索引收集元素）
     Tensor gather(int axis, const Tensor& indices) const;
-    
+
     // Concat/Split
     static Tensor concat(const std::vector<Tensor>& tensors, int axis);
     std::vector<Tensor> split(int num_splits, int axis) const;
+
+    // ========== 向量化过滤操作（方案3 - 通用API） ==========
+    // 返回非零/满足条件的索引（关键优化：直接返回索引列表，避免大量bool tensor）
+    std::vector<int64_t> nonzero() const;  // 返回非零元素的索引
+    std::vector<int64_t> where_indices(float threshold, const std::string& op = "ge") const;
+
+    // 根据索引选择元素（批量gather，避免逐个访问）
+    Tensor index_select(int dim, const std::vector<int64_t>& indices) const;
+
+    // 高效的多列提取（专为[C, N]格式优化）
+    LuaIntf::LuaRef extract_columns(lua_State* L, const std::vector<int64_t>& col_indices) const;
     
     // ========== Level 4: Legacy方法（向后兼容） ==========
     LuaIntf::LuaRef filter_yolo(lua_State* L, float conf_thres);
