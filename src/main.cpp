@@ -7,8 +7,7 @@
 #include "modules/lua_nn.h"
 #include "modules/lua_utils.h"
 
-// Forward declaration
-void register_all_modules(lua_State* L);
+
 
 void print_usage(const char* prog_name) {
     std::cout << "Usage: " << prog_name << " <script.lua> <model.onnx> <image.jpg>\n";
@@ -93,7 +92,9 @@ int main(int argc, char* argv[]) {
         {
             // 2. 注册C++模块
             std::cout << "Registering modules...\n";
-            register_all_modules(L);
+			lua_cv::register_module(L);
+			lua_nn::register_module(L);
+			lua_utils::register_module(L);
             
             // 3. 加载图像
             std::cout << "Loading image: " << image_path << "\n";

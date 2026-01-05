@@ -11,8 +11,7 @@
 #include "modules/lua_cv.h"
 #include "modules/lua_utils.h"
 
-// Forward declaration
-void register_all_modules(lua_State* L);
+
 
 void print_usage(const char* prog_name) {
     std::cout << "Usage: " << prog_name << " <test_script.lua>\n";
@@ -186,8 +185,10 @@ int run_lua_test_script(const std::string& script_path) {
     
     // 注册所有模块
     std::cout << "注册模块...\n";
-    register_all_modules(L);
-    
+	lua_cv::register_module(L);
+	lua_nn::register_module(L);
+	lua_utils::register_module(L);
+
     // 加载并运行脚本
     std::cout << "执行测试脚本...\n\n";
     int result = luaL_dofile(L, script_path.c_str());
