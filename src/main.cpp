@@ -1,5 +1,10 @@
 #include <iostream>
 #include <string>
+#include <fstream>
+#include <chrono>
+#include <iomanip>
+#include <algorithm>
+#include <opencv2/opencv.hpp>
 #include "LuaIntf.h"
 
 // 模块头文件
@@ -7,15 +12,131 @@
 #include "modules/lua_nn.h"
 #include "modules/lua_utils.h"
 
+// 内存监控结构
+struct MemoryInfo {
+    size_t vm_rss_kb = 0;   // 物理内存（KB）
+    size_t vm_size_kb = 0;  // 虚拟内存（KB）
 
+    void update() {
+        std::ifstream status("/proc/self/status");
+        std::string line;
+        while (std::getline(status, line)) {
+            if (line.find("VmRSS:") == 0) {
+                sscanf(line.c_str(), "VmRSS: %zu", &vm_rss_kb);
+            } else if (line.find("VmSize:") == 0) {
+                sscanf(line.c_str(), "VmSize: %zu", &vm_size_kb);
+            }
+        }
+    }
+
+    std::string to_string() const {
+        std::ostringstream oss;
+        oss << "RSS=" << std::fixed << std::setprecision(1)
+            << (vm_rss_kb / 1024.0) << "MB, "
+            << "VM=" << (vm_size_kb / 1024.0) << "MB";
+        return oss.str();
+    }
+};
+
+// 推理上下文
+struct InferenceContext {
+    lua_State* L = nullptr;
+    std::unique_ptr<lua_nn::Session> session;
+    LuaIntf::LuaRef preprocess;
+    LuaIntf::LuaRef postprocess;
+
+    ~InferenceContext() {
+        if (L) {
+            lua_close(L);
+            L = nullptr;
+        }
+    }
+};
 
 void print_usage(const char* prog_name) {
-    std::cout << "Usage: " << prog_name << " <script.lua> <model.onnx> <image.jpg>\n";
-    std::cout << "Example:\n";
-    std::cout << "  " << prog_name << " scripts/yolov5_detector.lua models/yolov5n.onnx images/zidane.jpg\n";
+    std::cout << "Usage: " << prog_name << " <script.lua> <model.onnx> <input> [options]\n";
+    std::cout << "\nInput: image file (.jpg, .png) or video file (.mp4, .avi, .mov)\n";
+    std::cout << "\nOptions:\n";
+    std::cout << "  show          - Display window during processing\n";
+    std::cout << "  save=OUTPUT   - Save output (for video, e.g., save=output.mp4)\n";
+    std::cout << "  frames=N      - Process only first N frames (video only)\n";
+    std::cout << "  skip=N        - Process every Nth frame (video only, default: 1)\n";
+    std::cout << "\nExamples:\n";
+    std::cout << "  " << prog_name << " scripts/yolo11_detector.lua models/yolo11n.onnx images/zidane.jpg show\n";
+    std::cout << "  " << prog_name << " scripts/yolo11_seg.lua models/yolo11n-seg.onnx images/person.mp4 show\n";
+    std::cout << "  " << prog_name << " scripts/yolo11_seg.lua models/yolo11n-seg.onnx video.mp4 save=out.mp4 frames=100\n";
 }
 
-void print_results(LuaIntf::LuaRef results) {
+bool is_video_file(const std::string& filename) {
+    std::string ext = filename.substr(filename.find_last_of(".") + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return (ext == "mp4" || ext == "avi" || ext == "mov" || ext == "mkv" ||
+            ext == "flv" || ext == "wmv" || ext == "m4v");
+}
+
+// 初始化推理上下文
+std::unique_ptr<InferenceContext> init_inference(const std::string& script_path,
+                                                  const std::string& model_path) {
+    auto ctx = std::make_unique<InferenceContext>();
+
+    // 初始化Lua
+    ctx->L = luaL_newstate();
+    if (!ctx->L) throw std::runtime_error("Failed to create Lua state");
+    luaL_openlibs(ctx->L);
+
+    // 注册C++模块
+    std::cout << "Registering modules...\n";
+    lua_cv::register_module(ctx->L);
+    lua_nn::register_module(ctx->L);
+    lua_utils::register_module(ctx->L);
+
+    // 加载ONNX模型
+    std::cout << "Loading model: " << model_path << "\n";
+    ctx->session = std::make_unique<lua_nn::Session>(model_path);
+
+    // 加载Lua脚本
+    std::cout << "Loading script: " << script_path << "\n";
+    if (luaL_dofile(ctx->L, script_path.c_str()) != LUA_OK) {
+        throw std::runtime_error("Failed to load script: " + std::string(lua_tostring(ctx->L, -1)));
+    }
+
+    LuaIntf::LuaRef model = LuaIntf::LuaRef::popFromStack(ctx->L);
+    if (!model.isTable()) {
+        throw std::runtime_error("Script must return a Model table");
+    }
+
+    ctx->preprocess = model["preprocess"];
+    ctx->postprocess = model["postprocess"];
+
+    if (!ctx->preprocess.isFunction() || !ctx->postprocess.isFunction()) {
+        throw std::runtime_error("Model must have preprocess and postprocess functions");
+    }
+
+    return ctx;
+}
+
+// 执行推理
+LuaIntf::LuaRef run_inference(InferenceContext* ctx, lua_cv::Image& img) {
+    // 预处理
+    ctx->preprocess.pushToStack();
+    LuaIntf::LuaRef::fromValue(ctx->L, img).pushToStack();
+
+    if (lua_pcall(ctx->L, 1, 2, 0) != LUA_OK) {
+        throw std::runtime_error("Preprocess error: " + std::string(lua_tostring(ctx->L, -1)));
+    }
+
+    LuaIntf::LuaRef meta = LuaIntf::LuaRef::popFromStack(ctx->L);
+    LuaIntf::LuaRef input_tensor_ref = LuaIntf::LuaRef::popFromStack(ctx->L);
+
+    // 推理
+    lua_nn::Tensor input_tensor = input_tensor_ref.toValue<lua_nn::Tensor>();
+    LuaIntf::LuaRef outputs = ctx->session->run(ctx->L, input_tensor);
+
+    // 后处理
+    return ctx->postprocess.call<LuaIntf::LuaRef>(outputs, meta);
+}
+
+void print_results(LuaIntf::LuaRef& results) {
     int len = results.len();
     if (len == 0) {
         std::cout << "No results.\n";
@@ -27,25 +148,17 @@ void print_results(LuaIntf::LuaRef results) {
         std::cout << "\n=== Detection Results ===\n";
         for (int i = 1; i <= len; ++i) {
             LuaIntf::LuaRef det = results[i];
-            
             float x = det.get<float>("x");
             float y = det.get<float>("y");
             float w = det.get<float>("w");
             float h = det.get<float>("h");
             float score = det.get<float>("score");
-            
-            std::string label = "unknown";
-            if (det.has("label")) {
-                label = det.get<std::string>("label");
-            }
-            
-            std::cout << "Box " << i << ": "
-                      << label << " "
+            std::string label = det.has("label") ? det.get<std::string>("label") : "unknown";
+
+            std::cout << "Box " << i << ": " << label << " "
                       << "(" << x << ", " << y << ", " << w << ", " << h << ") "
                       << "conf=" << score;
-            if (det.has("keypoints")) {
-                std::cout << " +kpts";
-            }
+            if (det.has("keypoints")) std::cout << " +kpts";
             std::cout << "\n";
         }
         std::cout << "Total: " << len << " detections\n";
@@ -55,11 +168,108 @@ void print_results(LuaIntf::LuaRef results) {
             LuaIntf::LuaRef item = results[i];
             int class_id = item.get<int>("class_id");
             float conf = item.get<float>("confidence");
-            std::string label = "";
-            if (item.has("label")) {
-                label = " (" + item.get<std::string>("label") + ")";
-            }
+            std::string label = item.has("label") ? " (" + item.get<std::string>("label") + ")" : "";
             std::cout << "Top " << i << ": Class " << class_id << label << " Conf=" << conf << "\n";
+        }
+    }
+}
+
+void draw_detections(cv::Mat& frame, LuaIntf::LuaRef& detections) {
+    int len = detections.len();
+    if (len == 0) return;
+
+    LuaIntf::LuaRef first = detections[1];
+    if (!first.has("x") || !first.has("y")) return;
+
+    // 每个类别生成确定性颜色
+    static std::vector<cv::Scalar> colors;
+    if (colors.empty()) {
+        for (int i = 0; i < 80; ++i) {
+            int hue = (i * 40) % 180;
+            colors.push_back(cv::Scalar(
+                (hue < 60 ? 255 : (hue < 120 ? 255 - (hue-60)*4 : 0)),
+                (hue < 60 ? hue*4 : (hue < 120 ? 255 : 255 - (hue-120)*4)),
+                (hue < 60 ? 0 : (hue < 120 ? (hue-60)*4 : 255))
+            ));
+        }
+    }
+
+    for (int i = 1; i <= len; ++i) {
+        LuaIntf::LuaRef det = detections[i];
+        if (!det.isTable()) continue;
+
+        float x = det.get<float>("x");
+        float y = det.get<float>("y");
+        float w = det.get<float>("w");
+        float h = det.get<float>("h");
+        float score = det.get<float>("score");
+        int class_id = det.has("class_id") ? det.get<int>("class_id") : 0;
+        std::string label = det.has("label") ? det.get<std::string>("label") : "unknown";
+
+        // 绘制 mask
+        if (det.has("mask")) {
+            try {
+                lua_nn::Tensor mask_tensor = det.get<lua_nn::Tensor>("mask");
+                lua_nn::Tensor mask_2d = mask_tensor.squeeze(0);
+                int mh = mask_2d.shape()[0];
+                int mw = mask_2d.shape()[1];
+
+                cv::Mat mask(mh, mw, CV_32F);
+                std::memcpy(mask.data, mask_2d.data(), mh * mw * sizeof(float));
+
+                cv::Mat mask_u8;
+                mask.convertTo(mask_u8, CV_8U, 255);
+
+                cv::Mat color_mask = cv::Mat::zeros(mh, mw, CV_8UC3);
+                color_mask.setTo(colors[class_id % colors.size()], mask_u8);
+
+                cv::addWeighted(frame, 0.7, color_mask, 0.3, 0, frame);
+            } catch (...) {}
+        }
+
+        // 绘制边界框
+        cv::rectangle(frame, cv::Rect(x, y, w, h), cv::Scalar(0, 255, 0), 2);
+
+        // 绘制标签
+        std::string text = label + " " + std::to_string(score).substr(0, 4);
+        int baseline = 0;
+        cv::Size textSize = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
+        cv::rectangle(frame, cv::Point(x, y - textSize.height - 5),
+                     cv::Point(x + textSize.width, y), cv::Scalar(0, 255, 0), -1);
+        cv::putText(frame, text, cv::Point(x, y - 5),
+                   cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+
+        // 绘制关键点
+        if (det.has("keypoints")) {
+            LuaIntf::LuaRef kpts = det.get<LuaIntf::LuaRef>("keypoints");
+            int num_kpts = kpts.len();
+            std::vector<cv::Point> points;
+            for(int k=1; k<=num_kpts; ++k) {
+                LuaIntf::LuaRef kp = kpts[k];
+                float kx = kp.get<float>("x");
+                float ky = kp.get<float>("y");
+                float kv = kp.get<float>("v");
+                if (kv > 0.5) {
+                    cv::circle(frame, cv::Point(kx, ky), 3, cv::Scalar(0, 0, 255), -1);
+                    points.push_back(cv::Point(kx, ky));
+                } else {
+                    points.push_back(cv::Point(-1, -1));
+                }
+            }
+
+            const std::vector<std::pair<int, int>> skeleton = {
+                {0,1}, {0,2}, {1,3}, {2,4}, {5,6}, {5,7}, {7,9},
+                {6,8}, {8,10}, {11,12}, {11,13}, {13,15}, {12,14},
+                {14,16}, {5,11}, {6,12}
+            };
+
+            for (const auto& limb : skeleton) {
+                if (limb.first < points.size() && limb.second < points.size() &&
+                    points[limb.first].x != -1 && points[limb.second].x != -1) {
+                    cv::line(frame, points[limb.first], points[limb.second],
+                            cv::Scalar(255, 0, 0), 2);
+                }
+            }
         }
     }
 }
@@ -69,204 +279,202 @@ int main(int argc, char* argv[]) {
         print_usage(argv[0]);
         return 1;
     }
-    
+
     std::string script_path = argv[1];
     std::string model_path = argv[2];
-    std::string image_path = argv[3];
+    std::string input_path = argv[3];
+
     bool show_result = false;
-    
-    if (argc > 4 && std::string(argv[4]) == "show") {
-        show_result = true;
+    std::string save_path = "";
+    int max_frames = -1;
+    int skip_frames = 1;
+
+    // 解析可选参数
+    for (int i = 4; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "show") {
+            show_result = true;
+        } else if (arg.find("save=") == 0) {
+            save_path = arg.substr(5);
+        } else if (arg.find("frames=") == 0) {
+            max_frames = std::stoi(arg.substr(7));
+        } else if (arg.find("skip=") == 0) {
+            skip_frames = std::stoi(arg.substr(5));
+        }
     }
-    
-    lua_State* L = nullptr;
 
     try {
-        // 1. 初始化Lua
-        L = luaL_newstate();
-        if (!L) {
-            throw std::runtime_error("Failed to create Lua state");
-        }
-        luaL_openlibs(L);
-        
-        {
-            // 2. 注册C++模块
-            std::cout << "Registering modules...\n";
-			lua_cv::register_module(L);
-			lua_nn::register_module(L);
-			lua_utils::register_module(L);
-            
-            // 3. 加载图像
-            std::cout << "Loading image: " << image_path << "\n";
-            auto img = lua_cv::imread(image_path);
-            std::cout << "Image size: " << img.width() << "x" << img.height() << "\n";
-            
-            // 4. 加载ONNX模型
-            std::cout << "Loading model: " << model_path << "\n";
-            lua_nn::Session session(model_path);
-            
-            // 5. 加载Lua脚本
-            std::cout << "Loading script: " << script_path << "\n";
-            if (luaL_dofile(L, script_path.c_str()) != LUA_OK) {
-                const char* err = lua_tostring(L, -1);
-                throw std::runtime_error("Failed to load script: " + std::string(err));
-            }
-            
-            // 6. 获取Model table
-            LuaIntf::LuaRef model = LuaIntf::LuaRef::popFromStack(L);
-            if (!model.isTable()) {
-                throw std::runtime_error("Script must return a Model table");
-            }
-            
-            // 7. 预处理
-            std::cout << "Preprocessing...\n";
-            LuaIntf::LuaRef preprocess = model["preprocess"];
-            if (!preprocess.isFunction()) {
-                throw std::runtime_error("Model.preprocess must be a function");
-            }
-            
-            // Push function and argument
-            preprocess.pushToStack();
-            LuaIntf::LuaRef::fromValue(L, img).pushToStack();
-            
-            // Call with 1 argument, 2 results
-            if (lua_pcall(L, 1, 2, 0) != LUA_OK) {
-                const char* err = lua_tostring(L, -1);
-                throw std::runtime_error("Error running preprocess: " + std::string(err));
-            }
-            
-            LuaIntf::LuaRef meta = LuaIntf::LuaRef::popFromStack(L);
-            LuaIntf::LuaRef input_tensor_ref = LuaIntf::LuaRef::popFromStack(L);
-            
-            // 8. 推理
-            std::cout << "Running inference...\n";
-            // Convert LuaRef to Tensor object
-            lua_nn::Tensor input_tensor = input_tensor_ref.toValue<lua_nn::Tensor>();
-            LuaIntf::LuaRef outputs = session.run(L, input_tensor);
-            
-            // 9. 后处理
-            std::cout << "Postprocessing...\n";
-            LuaIntf::LuaRef postprocess = model["postprocess"];
-            if (!postprocess.isFunction()) {
-                throw std::runtime_error("Model.postprocess must be a function");
-            }
-            
-            LuaIntf::LuaRef detections = postprocess.call<LuaIntf::LuaRef>(outputs, meta);
-            
-            // 10. 打印结果
-            print_results(detections);
-            
-            // 11. 可视化结果
-            if (show_result) {
-                cv::Mat draw_img = cv::imread(image_path);
-                int len = detections.len();
-                
-                if (len > 0) {
-                    LuaIntf::LuaRef first = detections[1];
-                    if (first.has("x") && first.has("y")) {
-                        // Detection visualization
-                        for (int i = 1; i <= len; ++i) {
-                            LuaIntf::LuaRef det = detections[i];
-                            float x = det.get<float>("x");
-                            float y = det.get<float>("y");
-                            float w = det.get<float>("w");
-                            float h = det.get<float>("h");
-                            float score = det.get<float>("score");
-                            std::string label = det.has("label") ? det.get<std::string>("label") : "unknown";
-                            
-                            cv::rectangle(draw_img, cv::Rect(x, y, w, h), cv::Scalar(0, 255, 0), 2);
-                            std::string text = label + " " + std::to_string(score).substr(0, 4);
-                            int baseline = 0;
-                            cv::Size textSize = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
-                            cv::rectangle(draw_img, cv::Point(x, y - textSize.height - 5), cv::Point(x + textSize.width, y), cv::Scalar(0, 255, 0), -1);
-                            cv::putText(draw_img, text, cv::Point(x, y - 5), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
-                            
-                            // Segmentation Visualization
-                            if (det.has("mask")) {
-                                lua_nn::Tensor mask_tensor = det.get<lua_nn::Tensor>("mask");
-                                // Mask is 1xHxW float tensor (0 or 1)
-                                int mh = mask_tensor.shape()[1];
-                                int mw = mask_tensor.shape()[2];
-                                
-                                cv::Mat mask(mh, mw, CV_32F, mask_tensor.raw_data());
-                                cv::Mat mask_u8;
-                                mask.convertTo(mask_u8, CV_8U, 255);
-                                
-                                // Create colored mask
-                                cv::Mat color_mask = cv::Mat::zeros(mh, mw, CV_8UC3);
-                                // Random color based on class or index
-                                cv::Scalar color(rand()%255, rand()%255, rand()%255);
-                                color_mask.setTo(color, mask_u8);
-                                
-                                // Overlay
-                                cv::addWeighted(draw_img, 1.0, color_mask, 0.5, 0, draw_img);
-                            }
+        // 初始化推理上下文（共用）
+        auto ctx = init_inference(script_path, model_path);
 
-                            // Pose Visualization
-                            if (det.has("keypoints")) {
-                                LuaIntf::LuaRef kpts = det.get<LuaIntf::LuaRef>("keypoints");
-                                int num_kpts = kpts.len();
-                                std::vector<cv::Point> points;
-                                for(int k=1; k<=num_kpts; ++k) {
-                                    LuaIntf::LuaRef kp = kpts[k];
-                                    float kx = kp.get<float>("x");
-                                    float ky = kp.get<float>("y");
-                                    float kv = kp.get<float>("v");
-                                    if (kv > 0.5) {
-                                        cv::circle(draw_img, cv::Point(kx, ky), 3, cv::Scalar(0, 0, 255), -1);
-                                        points.push_back(cv::Point(kx, ky));
-                                    } else {
-                                        points.push_back(cv::Point(-1, -1));
-                                    }
-                                }
-                                
-                                // Draw skeleton (COCO 17 keypoints)
-                                const std::vector<std::pair<int, int>> skeleton = {
-                                    {0,1}, {0,2}, {1,3}, {2,4}, // Face
-                                    {5,6}, {5,7}, {7,9}, {6,8}, {8,10}, // Arms
-                                    {11,12}, {11,13}, {13,15}, {12,14}, {14,16}, // Legs
-                                    {5,11}, {6,12} // Torso
-                                };
-                                
-                                for (const auto& limb : skeleton) {
-                                    int idx1 = limb.first;
-                                    int idx2 = limb.second;
-                                    if (idx1 < points.size() && idx2 < points.size() && 
-                                        points[idx1].x != -1 && points[idx2].x != -1) {
-                                        cv::line(draw_img, points[idx1], points[idx2], cv::Scalar(255, 0, 0), 2);
-                                    }
-                                }
-                            }
-                        }
-                    } else if (first.has("class_id")) {
-                        // Classification visualization
-                        for (int i = 1; i <= std::min(len, 5); ++i) {
-                            LuaIntf::LuaRef item = detections[i];
-                            int class_id = item.get<int>("class_id");
-                            float conf = item.get<float>("confidence");
-                            std::string text = "Class " + std::to_string(class_id) + ": " + std::to_string(conf).substr(0, 4);
-                            cv::putText(draw_img, text, cv::Point(10, 30 * i), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
-                        }
-                    }
+        // 判断是视频还是图片
+        if (is_video_file(input_path)) {
+            // ========== 视频推理模式 ==========
+            cv::VideoCapture cap(input_path);
+            if (!cap.isOpened()) {
+                throw std::runtime_error("Failed to open video: " + input_path);
+            }
+
+            int total_frames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
+            double fps = cap.get(cv::CAP_PROP_FPS);
+            int width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
+            int height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+
+            std::cout << "\n=== Video Info ===\n";
+            std::cout << "Resolution: " << width << "x" << height << "\n";
+            std::cout << "Total frames: " << total_frames << "\n";
+            std::cout << "FPS: " << fps << "\n";
+            std::cout << "Process: every " << skip_frames << " frame(s)\n";
+            if (max_frames > 0) std::cout << "Limit: " << max_frames << " frames\n";
+            std::cout << "\n";
+
+            // 设置视频输出
+            cv::VideoWriter writer;
+            if (!save_path.empty()) {
+                int fourcc = cv::VideoWriter::fourcc('m', 'p', '4', 'v');
+                writer.open(save_path, fourcc, fps / skip_frames, cv::Size(width, height));
+                if (!writer.isOpened()) {
+                    std::cerr << "Warning: Failed to open video writer\n";
+                } else {
+                    std::cout << "Output: " << save_path << "\n\n";
                 }
-                
-                cv::imshow("Result", draw_img);
-                std::cout << "Press any key to exit..." << std::endl;
-                cv::waitKey(0);
+            }
+
+            // 内存监控初始化
+            MemoryInfo mem_start, mem_current, mem_peak;
+            mem_start.update();
+            mem_peak = mem_start;
+
+            std::cout << std::string(70, '=') << "\n";
+            std::cout << "Starting video inference...\n";
+            std::cout << "Initial memory: " << mem_start.to_string() << "\n";
+            std::cout << std::string(70, '=') << "\n\n";
+
+            // 处理视频帧
+            int frame_count = 0, processed_count = 0;
+            auto start_time = std::chrono::high_resolution_clock::now();
+            auto last_print_time = start_time;
+
+            cv::Mat frame;
+            while (cap.read(frame)) {
+                frame_count++;
+                if (frame_count % skip_frames != 0) continue;
+                processed_count++;
+                if (max_frames > 0 && processed_count > max_frames) break;
+
+                // 推理
+                auto img = lua_cv::Image(frame.clone());
+                LuaIntf::LuaRef detections = run_inference(ctx.get(), img);
+
+                // 绘制结果
+                draw_detections(frame, detections);
+
+                if (writer.isOpened()) writer.write(frame);
+                if (show_result) {
+                    cv::imshow("Video Inference", frame);
+                    if (cv::waitKey(1) == 27) break;
+                }
+
+                // 更新内存
+                mem_current.update();
+                if (mem_current.vm_rss_kb > mem_peak.vm_rss_kb) mem_peak = mem_current;
+
+                // 进度显示
+                auto now = std::chrono::high_resolution_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_print_time).count() >= 1000 || processed_count == 1) {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
+                    double current_fps = processed_count * 1000.0 / elapsed;
+
+                    std::cout << "\rFrame " << std::setw(5) << processed_count
+                             << " (" << frame_count << ")"
+                             << " | FPS: " << std::fixed << std::setprecision(1) << std::setw(5) << current_fps
+                             << " | Det: " << std::setw(2) << detections.len()
+                             << " | " << mem_current.to_string() << "     " << std::flush;
+                    last_print_time = now;
+                }
+            }
+
+            // 结果统计
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto total_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+
+            std::cout << "\n\n" << std::string(70, '=') << "\n";
+            std::cout << "=== Processing Complete ===\n";
+            std::cout << "Processed: " << processed_count << " frames (total: " << frame_count << ")\n";
+            std::cout << "Time: " << std::fixed << std::setprecision(2) << (total_time / 1000.0) << " s\n";
+            std::cout << "Average FPS: " << std::fixed << std::setprecision(2)
+                     << (processed_count * 1000.0 / total_time) << "\n";
+            std::cout << "Per frame: " << std::fixed << std::setprecision(1)
+                     << (total_time / (double)processed_count) << " ms\n";
+
+            std::cout << "\n=== Memory Summary ===\n";
+            std::cout << "Initial:  " << mem_start.to_string() << "\n";
+            std::cout << "Final:    " << mem_current.to_string() << "\n";
+            std::cout << "Peak:     " << mem_peak.to_string() << "\n";
+
+            long mem_increase = (long)mem_current.vm_rss_kb - (long)mem_start.vm_rss_kb;
+            std::cout << "Increase: " << std::fixed << std::setprecision(1)
+                     << (mem_increase / 1024.0) << " MB\n";
+
+            if (processed_count > 100) {
+                double leak_per_frame = mem_increase / (double)processed_count;
+                std::cout << "Per frame: " << std::fixed << std::setprecision(2)
+                         << leak_per_frame << " KB\n";
+
+                if (leak_per_frame > 10) {
+                    std::cout << "\n⚠️  WARNING: Potential memory leak!\n";
+                    std::cout << "   " << leak_per_frame << " KB/frame\n";
+                } else if (leak_per_frame > 1) {
+                    std::cout << "\n⚠️  NOTICE: Minor memory growth\n";
+                } else {
+                    std::cout << "\n✅ Memory stable - no leaks detected\n";
+                }
+            }
+            std::cout << std::string(70, '=') << "\n";
+
+            cap.release();
+            if (writer.isOpened()) {
+                writer.release();
+                std::cout << "\nOutput saved: " << save_path << "\n";
+            }
+            if (show_result) cv::destroyAllWindows();
+
+        } else {
+            // ========== 图片推理模式 ==========
+            std::cout << "Loading image: " << input_path << "\n";
+            auto img = lua_cv::imread(input_path);
+            std::cout << "Image size: " << img.width() << "x" << img.height() << "\n\n";
+
+            std::cout << "Preprocessing...\n";
+            std::cout << "Running inference...\n";
+            std::cout << "Postprocessing...\n";
+
+            LuaIntf::LuaRef detections = run_inference(ctx.get(), img);
+
+            print_results(detections);
+
+            if (show_result || !save_path.empty()) {
+                cv::Mat draw_img = cv::imread(input_path);
+                draw_detections(draw_img, detections);
+
+                if (!save_path.empty()) {
+                    cv::imwrite(save_path, draw_img);
+                    std::cout << "\nResult saved to: " << save_path << "\n";
+                }
+
+                if (show_result) {
+                    cv::imshow("Result", draw_img);
+                    std::cout << "Press any key to exit...\n";
+                    cv::waitKey(0);
+                    cv::destroyAllWindows();
+                }
             }
         }
-        
-        // 12. 清理
-        if (L) {
-            lua_close(L);
-            L = nullptr;
-        }
-        
+
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
-        if (L) lua_close(L);
         return 1;
     }
-    
+
     return 0;
 }

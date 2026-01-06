@@ -48,18 +48,51 @@ make
 ## 🏃 Usage
 
 ### Lua Inference Engine (Recommended)
-The main engine uses Lua scripts to define the pipeline.
+The main engine uses Lua scripts to define the pipeline. Supports both **images** and **videos** with automatic detection based on file extension.
 
+#### Image Inference
 ```bash
 # Syntax
-./model_infer <script_path> <model_path> <image_path> [show]
+./model_infer <script_path> <model_path> <image_path> [options]
 
-# Example
+# Basic usage
 ./model_infer ../scripts/yolov5_detector.lua ../models/yolov5n.onnx ../images/zidane.jpg
 
-# With Visualization
+# With visualization window
 ./model_infer ../scripts/yolov5_detector.lua ../models/yolov5n.onnx ../images/zidane.jpg show
+
+# Save result to file
+./model_infer ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/zidane.jpg save=output.jpg
 ```
+
+#### Video Inference
+Automatically processes video files (.mp4, .avi, .mov, etc.) with real-time memory monitoring.
+
+```bash
+# Basic usage (process all frames)
+./model_infer ../scripts/yolo11_detector.lua ../models/yolo11n.onnx ../images/video.mp4
+
+# With real-time display
+./model_infer ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/video.mp4 show
+
+# Save output video
+./model_infer ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/video.mp4 save=output.mp4
+
+# Process only first 100 frames (for testing)
+./model_infer ../scripts/yolo11_detector.lua ../models/yolo11n.onnx ../images/video.mp4 frames=100
+
+# Skip frames (process every 2nd frame for speed)
+./model_infer ../scripts/yolo11_detector.lua ../models/yolo11n.onnx ../images/video.mp4 skip=2
+
+# Combine options
+./model_infer ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/video.mp4 show save=out.mp4 frames=200 skip=2
+```
+
+**Video Features:**
+- ✅ Real-time FPS and detection count display
+- ✅ Memory leak detection (warns if >10 KB/frame growth)
+- ✅ Progress tracking with memory usage monitoring
+- ✅ Support for all common video formats
 
 ### Pure C++ Inference (Benchmark)
 A hardcoded C++ implementation is provided for performance comparison.
