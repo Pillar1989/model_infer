@@ -1,4 +1,4 @@
--- YOLOv5 Object Detection Script (使用新Tensor API)
+-- YOLOv5 Object Detection Script (纯Tensor API实现 - 使用修复后的API)
 -- YOLOv5格式: [1, 25200, 85] = [batch, num_boxes, 4_coords + 1_obj + 80_classes]
 local utils = lua_utils
 local nn = lua_nn
@@ -37,7 +37,7 @@ function Model.preprocess(img)
 
     local dw = target_w - new_w
     local dh = target_h - new_h
-    
+
     dw = dw % Model.config.stride
     dh = dh % Model.config.stride
 
@@ -62,7 +62,7 @@ function Model.preprocess(img)
     return input_tensor, meta
 end
 
--- 使用向量化Tensor操作实现YOLOv5后处理（方案3 - 极致性能）
+-- 使用纯Tensor API实现YOLOv5后处理
 function Model.postprocess(outputs, meta)
     local output = outputs["output0"]
 
@@ -70,87 +70,76 @@ function Model.postprocess(outputs, meta)
         error("Missing output0")
     end
 
-    -- YOLOv5格式: [1, 25200, 85] = [batch, num_boxes, 4_coords + 1_obj + 80_classes]
-    -- 先squeeze掉batch维度 -> [25200, 85]
-    local data = output:squeeze(0)
+    -- YOLOv5格式: [1, 25200, 85]
+    -- 85 = 4(xywh) + 1(objectness) + 80(classes)
+    local data = output:squeeze(0)  -- [25200, 85]
 
-    -- 1. 提取不同部分（沿axis=1切片）
-    local boxes = data:slice(1, 0, 4, 1)        -- [25200, 4]
-    local objectness = data:slice(1, 4, 5, 1):squeeze(1)  -- [25200]
-    local class_scores = data:slice(1, 5, 85, 1)  -- [25200, 80]
+    -- 提取各部分
+    local boxes_x = data:get_column(0)      -- [25200]
+    local boxes_y = data:get_column(1)      -- [25200]
+    local boxes_w = data:get_column(2)      -- [25200]
+    local boxes_h = data:get_column(3)      -- [25200]
+    local objectness = data:get_column(4)   -- [25200]
 
-    -- 2. 预先用objectness过滤（第一轮过滤）
-    local obj_valid_indices = objectness:where_indices(Model.config.conf_thres, "ge")
+    -- 提取类别分数 [25200, 80]
+    local class_scores = data:slice_columns(5, 85)
 
-    if #obj_valid_indices == 0 then
-        print("过滤后候选框: 0")
-        return {}
-    end
-
-    -- 3. 只对通过objectness过滤的boxes进行类别分析
-    local filtered_boxes_tensor = boxes:index_select(0, obj_valid_indices)  -- [M, 4]
-    local filtered_obj_tensor = objectness:index_select(0, obj_valid_indices)  -- [M]
-    local filtered_class_scores = class_scores:index_select(0, obj_valid_indices)  -- [M, 80]
-
-    -- 4. 找到每个box的最大类别分数
-    local max_class_scores = filtered_class_scores:max(1, false)  -- [M] 沿类别维度取最大值
-    local class_ids = filtered_class_scores:argmax(1)  -- Lua table [M]
-
-    -- 5. 计算最终分数（objectness * class_score），再次过滤
-    local final_scores_tensor = filtered_obj_tensor:mul_tensor(max_class_scores)  -- [M]
-    local final_valid_indices = final_scores_tensor:where_indices(Model.config.conf_thres, "ge")
-
-    print(string.format("过滤后候选框: %d", #final_valid_indices))
-
-    if #final_valid_indices == 0 then
-        return {}
-    end
-
-    -- 6. 最终数据提取（数据量已经很小）
-    local final_boxes = filtered_boxes_tensor:index_select(0, final_valid_indices):to_table()
-    local final_scores = final_scores_tensor:index_select(0, final_valid_indices):to_table()
+    -- 1. 对每个box找最大类别分数和类别ID
+    local max_class_scores = class_scores:max(1, false)  -- [25200]
+    local class_ids = class_scores:argmax(1)  -- Lua table [25200]
 
     local proposals = {}
+    local num_boxes = 25200
 
-    -- 7. 构建proposals
-    for i = 1, #final_valid_indices do
-        local box_data = final_boxes[i]
-        local idx = final_valid_indices[i]
+    -- 2. 遍历所有boxes，进行过滤（YOLOv5需要两次过滤）
+    for i = 0, num_boxes - 1 do
+        local obj = objectness:get(i)
 
-        local cx = box_data[1]
-        local cy = box_data[2]
-        local w = box_data[3]
-        local h = box_data[4]
-        local cls_id = class_ids[idx + 1]  -- Lua索引从1开始
+        -- 第一次过滤：objectness 阈值
+        if obj < Model.config.conf_thres then
+            goto continue
+        end
 
-        -- 将中心点坐标转换为左上角坐标
-        local x = cx - w / 2.0
-        local y = cy - h / 2.0
+        local max_cls_score = max_class_scores:get(i)
 
-        table.insert(proposals, {
-            x = x,
-            y = y,
-            w = w,
-            h = h,
-            score = final_scores[i],
-            class_id = cls_id,
-            label = Model.config.labels[cls_id + 1] or "unknown"
-        })
+        -- 计算最终分数 = objectness * max_class_score
+        local final_score = obj * max_cls_score
+
+        -- 第二次过滤：final_score 阈值
+        if final_score >= Model.config.conf_thres then
+            local cx = boxes_x:get(i)
+            local cy = boxes_y:get(i)
+            local w = boxes_w:get(i)
+            local h = boxes_h:get(i)
+            local cls_id = class_ids[i + 1]  -- Lua table 从1开始索引
+
+            -- 中心点转左上角
+            local x = cx - w / 2.0
+            local y = cy - h / 2.0
+
+            -- 坐标还原到原图
+            x = (x - meta.pad_x) / meta.scale
+            y = (y - meta.pad_y) / meta.scale
+            w = w / meta.scale
+            h = h / meta.scale
+
+            table.insert(proposals, {
+                x = x,
+                y = y,
+                w = w,
+                h = h,
+                score = final_score,
+                class_id = cls_id,
+                label = Model.config.labels[cls_id + 1] or "unknown"
+            })
+        end
+
+        ::continue::
     end
-    
-    -- 坐标还原到原图
-    for _, box in ipairs(proposals) do
-        box.x = (box.x - meta.pad_x) / meta.scale
-        box.y = (box.y - meta.pad_y) / meta.scale
-        box.w = box.w / meta.scale
-        box.h = box.h / meta.scale
-    end
-    
-    -- NMS
+
+    -- 3. NMS
     local final_boxes = utils.nms(proposals, Model.config.iou_thres)
-    
-    print(string.format("NMS后最终框: %d", #final_boxes))
-    
+
     return final_boxes
 end
 
