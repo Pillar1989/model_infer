@@ -5,7 +5,7 @@
 
 namespace tensor {
 
-std::shared_ptr<CpuStorage> CpuStorage::allocate(size_t size_bytes, size_t alignment) {
+std::shared_ptr<CpuStorage> CpuStorage::allocate(size_t size_bytes, size_t alignment, bool zero_init) {
     if (size_bytes == 0) {
         throw std::invalid_argument("CpuStorage::allocate: size_bytes cannot be 0");
     }
@@ -31,8 +31,10 @@ std::shared_ptr<CpuStorage> CpuStorage::allocate(size_t size_bytes, size_t align
         throw std::bad_alloc();
     }
 
-    // 初始化为 0
-    std::memset(storage->data_, 0, aligned_size);
+    // 只在明确需要时初始化为 0（默认跳过，提高性能）
+    if (zero_init) {
+        std::memset(storage->data_, 0, aligned_size);
+    }
 
     storage->size_bytes_ = size_bytes;
     storage->alignment_ = alignment;
