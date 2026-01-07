@@ -21,8 +21,9 @@ public:
      * 分配对齐内存
      * @param size_bytes 字节数
      * @param alignment 对齐要求（默认 64 字节）
+     * @param zero_init 是否初始化为0（默认 false，提高性能）
      */
-    static std::shared_ptr<CpuStorage> allocate(size_t size_bytes, size_t alignment = 64);
+    static std::shared_ptr<CpuStorage> allocate(size_t size_bytes, size_t alignment = 64, bool zero_init = false);
 
     /**
      * 引用外部内存（零拷贝）
