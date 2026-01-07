@@ -77,9 +77,10 @@ function Model.postprocess(outputs, meta)
     local num_kpt = Model.config.num_keypoints
 
     -- 1. 分离boxes, scores, keypoints
-    local boxes = output:slice(1, 0, 4, 1):squeeze(0)  -- [4, 8400]
-    local person_scores = output:slice(1, 4, 5, 1):squeeze(0):squeeze(0)  -- [8400]
-    local keypoints = output:slice(1, 5, 56, 1):squeeze(0)  -- [51, 8400]
+    -- 关键优化：立即调用contiguous()确保后续操作高效
+    local boxes = output:slice(1, 0, 4, 1):squeeze(0):contiguous()  -- [4, 8400]
+    local person_scores = output:slice(1, 4, 5, 1):squeeze(0):squeeze(0):contiguous()  -- [8400]
+    local keypoints = output:slice(1, 5, 56, 1):squeeze(0):contiguous()  -- [51, 8400]
 
     -- 2. 向量化过滤：找出满足条件的索引
     local valid_indices = person_scores:where_indices(Model.config.conf_thres, "ge")
@@ -90,35 +91,30 @@ function Model.postprocess(outputs, meta)
         return {}
     end
 
-    -- 3. 批量提取有效数据
-    local filtered_boxes = boxes:extract_columns(valid_indices)  -- {{cx,cy,w,h}, ...}
-    local filtered_scores_tensor = person_scores:index_select(0, valid_indices)
-    local filtered_scores = filtered_scores_tensor:to_table()
-    local filtered_keypoints = keypoints:extract_columns(valid_indices)  -- {{kpt_data...}, ...}
-
+    -- 3. 直接遍历有效索引，使用 at() 高效访问元素（避免 to_table 转换）
     local proposals = {}
 
-    -- 4. 只遍历过滤后的小数据集
     for i = 1, #valid_indices do
-        local box_data = filtered_boxes[i]
-        local kpt_data = filtered_keypoints[i]
+        local col = valid_indices[i]  -- 0-based column index
 
-        local cx = box_data[1]
-        local cy = box_data[2]
-        local w = box_data[3]
-        local h = box_data[4]
+        -- 直接从原始 boxes tensor 提取坐标 [4, 8400]
+        local cx = boxes:at(0, col)
+        local cy = boxes:at(1, col)
+        local w = boxes:at(2, col)
+        local h = boxes:at(3, col)
+        local conf = person_scores:get(col)
 
         -- 将中心点坐标转换为左上角坐标
         local x = cx - w / 2.0
         local y = cy - h / 2.0
 
-        -- 提取17个关键点(每个3个值: x, y, conf)
+        -- 提取17个关键点(每个3个值: x, y, conf) 直接从 keypoints tensor [51, 8400]
         local kpts = {}
         for j = 1, num_kpt do
-            local idx_base = (j - 1) * 3
-            local kpt_x = kpt_data[idx_base + 1] or 0
-            local kpt_y = kpt_data[idx_base + 2] or 0
-            local kpt_c = kpt_data[idx_base + 3] or 0
+            local row_base = (j - 1) * 3
+            local kpt_x = keypoints:at(row_base, col)
+            local kpt_y = keypoints:at(row_base + 1, col)
+            local kpt_c = keypoints:at(row_base + 2, col)
 
             kpts[j] = {
                 x = kpt_x,
@@ -134,7 +130,7 @@ function Model.postprocess(outputs, meta)
             y = y,
             w = w,
             h = h,
-            score = filtered_scores[i],
+            score = conf,
             class_id = 0,  -- person类别
             label = "person",
             keypoints = kpts
