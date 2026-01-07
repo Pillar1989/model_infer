@@ -83,9 +83,10 @@ function Model.postprocess(outputs, meta)
     local scores = output0:slice(1, 4, 4 + num_classes, 1):squeeze(0):contiguous()  -- [80, 8400]
     local mask_coeffs = output0:slice(1, 4 + num_classes, 116, 1):squeeze(0):contiguous()  -- [32, 8400]
 
-    -- 2. 找到最大分数和类别
-    local max_scores = scores:max(0, false)  -- [8400]
-    local class_ids = scores:argmax(0)  -- Lua table [8400]
+    -- 2. 找到最大分数和类别 (融合操作，单次遍历)
+    local result = scores:max_with_argmax(0)  -- {values=Tensor[8400], indices=table[8400]}
+    local max_scores = result.values
+    local class_ids = result.indices
 
     -- 3. 向量化过滤：找出满足条件的索引
     local valid_indices = max_scores:where_indices(Model.config.conf_thres, "ge")
