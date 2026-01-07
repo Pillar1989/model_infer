@@ -107,27 +107,34 @@ A hardcoded C++ implementation is provided for performance comparison.
 
 ## 📊 Benchmark Results
 
-Comparison between different implementations on YOLO11n detection task (640x640).
+### YOLOv5n Performance (640x640, tested with precise measurements)
 
-| Implementation | Time (ms) | vs C++ | Memory | Notes |
-|:--------------|----------:|:------:|:------:|:------|
-| **C++ (`cpp_infer`)** | 180 | - | ~145 MB | Baseline (YOLOv5 only) |
-| **Lua + Vectorized Tensor API** | **200** | +11% | ~150 MB | ✅ **Recommended** |
-| **Lua + `filter_yolo`** | 290 | +61% | ~150 MB | Legacy specialized API |
-| **Lua + Naive Tensor API** | 515 | +186% | ~160 MB | ❌ Avoid |
+**C++ Baseline (`cpp_infer`):**
+```
+Preprocess:  19 ms
+Inference:  144 ms
+Postprocess: 21 ms
+Total:     ~184 ms
+```
 
-### Time Distribution Analysis
+**Lua Implementation (`yolov5_benchmark.lua`):**
+```
+Preprocess:  ~16 ms (letterbox 2ms + to_tensor 14ms)
+Inference:  ~144 ms (same ONNX Runtime)
+Postprocess: ~23 ms (max_with_argmax 9ms + filtering 14ms + NMS 0.03ms)
+Total:     ~183 ms
+```
 
-| Stage | Time | % |
-|-------|------|---|
-| ONNX Inference | ~100ms | **50%** |
-| Model Loading | ~80ms | One-time |
-| Image Load + Preprocess | ~15ms | 7.5% |
-| **Postprocess (Tensor API)** | **~4.5ms** | **2.2%** |
+**Key Findings:**
+- Lua preprocessing is actually **faster** than C++ (16ms vs 19ms)
+- Postprocessing is nearly identical (23ms vs 21ms)
+- ONNX inference time is unchanged (both use the same C++ runtime)
+- The Tensor API adds negligible overhead (<0.02ms for tensor operations)
+- Main cost is in Lua loop for proposal filtering (~14ms)
 
-**Key Takeaway**: The Tensor API postprocess is extremely efficient (~4.5ms). The bottleneck is ONNX inference (~100ms), which is determined by model complexity.
+**Detailed profiling available:** Run `./model_infer scripts/yolov5_benchmark.lua models/yolov5n.onnx images/zidane.jpg` to see timing breakdown for each operation.
 
-*Note: Tested on Linux x64 AMD Ryzen 9 3900X 12-Core Processor.*
+*Tested on Linux x64 AMD Ryzen 9 3900X 12-Core Processor.*
 
 ## �📂 Project Structure
 
@@ -140,6 +147,7 @@ Comparison between different implementations on YOLO11n detection task (640x640)
 - `scripts/`: Lua scripts defining inference logic.
   - `yolo11_*.lua`: YOLO11 inference scripts (detection, segmentation, pose).
   - `yolov5_*.lua`: YOLOv5 inference scripts.
+  - `yolov5_benchmark.lua`: YOLOv5 with detailed timing profiling.
   - `*_tensor_*.lua`: Tensor API-based implementations.
   - `test_tensor*.lua`: Tensor API test scripts.
 - `lua/`: Lua 5.5 source code (compiled as C++).
@@ -409,29 +417,11 @@ print(string.format("Found %d objects", #results))
 
 ### Example Scripts
 
-- **YOLO11 Detection**: [scripts/yolo11_detector.lua](scripts/yolo11_detector.lua) - Uses `filter_yolo` API (fast)
-- **YOLO11 Tensor Version**: [scripts/yolo11_tensor_detector.lua](scripts/yolo11_tensor_detector.lua) - Pure tensor operations
-- **YOLO11 Segmentation**: [scripts/yolo11_seg.lua](scripts/yolo11_seg.lua) - Instance segmentation with masks
-- **YOLO11 Pose**: [scripts/yolo11_pose.lua](scripts/yolo11_pose.lua) - 17 COCO keypoints
-- **YOLOv5 Detection**: [scripts/yolov5_detector.lua](scripts/yolov5_detector.lua) - Classic anchor-based detection
-
-### Performance Comparison (YOLO11n Detection)
-
-| Implementation | Time (ms) | Overhead | Code Flexibility | Status |
-|:---------------|----------:|:--------:|:----------------:|:------:|
-| C++ (`cpp_infer`) | 180 | - | ❌ Low (hardcoded) | Baseline (YOLOv5) |
-| **Lua + Vectorized Tensor API** | **200** | **+11%** | ✅ **High** | ✅ **Recommended** |
-| Lua + `filter_yolo` | 290 | +61% | ⚠️ Medium (YOLO-specific) | Legacy |
-| Lua + Naive Tensor API | 515 | +186% | ✅ High | ❌ Avoid |
-
-**Key Insights:**
-- ✅ **Vectorized Tensor API achieves near-C++ performance** while remaining fully generic
-- ✅ `max_with_argmax()` fuses two operations into single pass (saves ~0.35ms)
-- ✅ `where_indices()` + `extract_columns()` + `index_select()` enable high-performance filtering
-- ✅ Postprocess only takes ~4.5ms (2.2% of total time)
-- ⚠️ Legacy `filter_yolo()` retained for backward compatibility but no longer needed
-
-**Migration Path:** All `*_tensor_*.lua` scripts have been updated to use the vectorized API. See [scripts/yolo11_tensor_detector.lua](scripts/yolo11_tensor_detector.lua) for reference implementation.
+- **YOLO11 Detection**: [scripts/yolo11_tensor_detector.lua](scripts/yolo11_tensor_detector.lua) - Vectorized tensor operations
+- **YOLO11 Segmentation**: [scripts/yolo11_tensor_seg.lua](scripts/yolo11_tensor_seg.lua) - Instance segmentation with masks
+- **YOLO11 Pose**: [scripts/yolo11_tensor_pose.lua](scripts/yolo11_tensor_pose.lua) - 17 COCO keypoints
+- **YOLOv5 Detection**: [scripts/yolov5_tensor_detector.lua](scripts/yolov5_tensor_detector.lua) - Classic anchor-based detection
+- **YOLOv5 Benchmark**: [scripts/yolov5_benchmark.lua](scripts/yolov5_benchmark.lua) - Detailed timing profiling
 
 ### Testing Your Script
 
