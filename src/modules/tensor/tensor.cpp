@@ -19,7 +19,8 @@ Tensor::Tensor(const std::vector<float>& data, const std::vector<int64_t>& shape
     : shape_(shape)
     , strides_(compute_strides(shape))
     , offset_(0)
-    , contiguous_(true) {
+    , contiguous_(true)
+    , device_cache_(DeviceType::CPU) {
     // 分配 CPU Storage 并复制数据
     storage_ = CpuStorage::allocate(data.size() * sizeof(float));
     std::memcpy(storage_->data(), data.data(), data.size() * sizeof(float));
@@ -29,7 +30,8 @@ Tensor::Tensor(std::vector<float>&& data, const std::vector<int64_t>& shape)
     : shape_(shape)
     , strides_(compute_strides(shape))
     , offset_(0)
-    , contiguous_(true) {
+    , contiguous_(true)
+    , device_cache_(DeviceType::CPU) {
     // 分配 CPU Storage 并移动数据
     storage_ = CpuStorage::allocate(data.size() * sizeof(float));
     std::memcpy(storage_->data(), data.data(), data.size() * sizeof(float));
@@ -40,9 +42,11 @@ Tensor::Tensor(const float* data, const std::vector<int64_t>& shape,
     : shape_(shape)
     , strides_(compute_strides(shape))
     , offset_(0)
-    , contiguous_(true) {
+    , contiguous_(true)
+    , device_cache_(DeviceType::CPU) {
     if (owner) {
         storage_ = owner;
+        device_cache_ = storage_->device();  // 更新为实际设备类型
     } else {
         int64_t total_size = compute_size();
         storage_ = CpuStorage::allocate(total_size * sizeof(float));
@@ -59,7 +63,8 @@ Tensor::Tensor(std::shared_ptr<TensorStorage> storage,
     , shape_(shape)
     , strides_(strides)
     , offset_(offset)
-    , contiguous_(contiguous) {}
+    , contiguous_(contiguous)
+    , device_cache_(storage->device()) {}
 
 // Static factory method for Lua binding
 Tensor Tensor::create(const std::vector<float>& data, const std::vector<int64_t>& shape) {
@@ -144,30 +149,40 @@ void Tensor::set_lua(int idx, float value) {
     }
 }
 
-// Extract columns as new Tensor (takes vector directly, auto-converted from Lua table)
-Tensor Tensor::extract_columns_tensor(const std::vector<int64_t>& cols) const {
+
+// 直接返回 Lua table 的版本 (避免 transpose + to_table 开销)
+// 返回行格式: {{row1_col1, row1_col2, ...}, {row2_col1, row2_col2, ...}, ...}
+// 对于 boxes[4, 8400], extract_columns({idx1, idx2}) 返回 {{cx1,cy1,w1,h1}, {cx2,cy2,w2,h2}}
+LuaIntf::LuaRef Tensor::extract_columns_lua(lua_State* L, const std::vector<int64_t>& cols) const {
     check_cpu();
     if (shape_.size() != 2) {
         throw std::runtime_error("extract_columns requires 2D tensor");
     }
 
     int64_t rows = shape_[0];
-    int64_t num_cols = static_cast<int64_t>(cols.size());
-
-    std::vector<float> result_data;
-    result_data.reserve(rows * num_cols);
-
-    Tensor contig = contiguous();
-    const float* src = contig.raw_data();
     int64_t src_cols = shape_[1];
 
-    for (int64_t r = 0; r < rows; ++r) {
-        for (int64_t c : cols) {
-            result_data.push_back(src[r * src_cols + c]);
+    // 使用 stride-based 访问，避免 contiguous() 调用
+    const float* base = static_cast<const float*>(storage_->data()) + offset_;
+    int64_t s0 = strides_[0];
+    int64_t s1 = strides_[1];
+
+    // 返回行格式（已转置）：外层是每个选中的列（box），内层是该列的所有行（cx,cy,w,h）
+    LuaIntf::LuaRef result = LuaIntf::LuaRef::createTable(L);
+
+    for (size_t i = 0; i < cols.size(); ++i) {
+        int64_t col = cols[i];
+        if (col < 0) col += src_cols;
+
+        // 每个 box 的数据：{cx, cy, w, h}
+        LuaIntf::LuaRef row_data = LuaIntf::LuaRef::createTable(L);
+        for (int64_t r = 0; r < rows; ++r) {
+            row_data[r + 1] = base[r * s0 + col * s1];
         }
+        result[i + 1] = row_data;
     }
 
-    return Tensor(std::move(result_data), {rows, num_cols});
+    return result;
 }
 
 // ========== 辅助方法 ==========
@@ -224,11 +239,7 @@ int64_t Tensor::compute_offset(const std::vector<int64_t>& indices) const {
     return offset;
 }
 
-void Tensor::check_cpu() const {
-    if (storage_->device() != DeviceType::CPU) {
-        throw std::runtime_error("Operation requires CPU tensor");
-    }
-}
+// check_cpu() 已内联到 tensor.h 中
 
 // ========== 数据访问 ==========
 
@@ -379,36 +390,145 @@ Tensor Tensor::contiguous_copy() const {
 
     check_cpu();
 
-    // 使用 strides 复制非连续 tensor 为连续存储
     int64_t total_size = compute_size();
     auto new_storage = CpuStorage::allocate(total_size * sizeof(float));
-    float* new_data = static_cast<float*>(new_storage->data());
-    const float* src = static_cast<const float*>(storage_->data());
+    float* dst = static_cast<float*>(new_storage->data());
+    const float* src = static_cast<const float*>(storage_->data()) + offset_;
+    int ndim = static_cast<int>(shape_.size());
 
-    // 递归遍历所有索引，使用 strides 计算正确的源地址
-    std::function<void(int64_t, std::vector<int64_t>&)> copy_recursive;
-    copy_recursive = [&](int64_t dim, std::vector<int64_t>& indices) {
-        if (dim == static_cast<int64_t>(shape_.size())) {
-            int64_t src_offset = offset_;
-            int64_t dst_offset = 0;
-            int64_t stride = 1;
-            for (int64_t i = static_cast<int64_t>(shape_.size()) - 1; i >= 0; --i) {
-                src_offset += indices[i] * strides_[i];
-                dst_offset += indices[i] * stride;
-                stride *= shape_[i];
+    // ========== 1D 特化 ==========
+    if (ndim == 1) {
+        int64_t n = shape_[0];
+        int64_t stride = strides_[0];
+
+        if (stride == 1) {
+            std::memcpy(dst, src, n * sizeof(float));
+        } else {
+            // 编译器可以向量化此简单循环
+            for (int64_t i = 0; i < n; ++i) {
+                dst[i] = src[i * stride];
             }
-            new_data[dst_offset] = src[src_offset];
-            return;
+        }
+    }
+    // ========== 2D 特化 ==========
+    else if (ndim == 2) {
+        int64_t n0 = shape_[0], n1 = shape_[1];
+        int64_t s0 = strides_[0], s1 = strides_[1];
+
+        if (s1 == 1 && s0 == n1) {
+            // 完全连续
+            std::memcpy(dst, src, total_size * sizeof(float));
+        } else if (s1 == 1) {
+            // 行连续：每行 memcpy
+            for (int64_t i = 0; i < n0; ++i) {
+                std::memcpy(dst + i * n1, src + i * s0, n1 * sizeof(float));
+            }
+        } else {
+            // 通用步进：硬编码双循环
+            int64_t dst_idx = 0;
+            for (int64_t i = 0; i < n0; ++i) {
+                for (int64_t j = 0; j < n1; ++j) {
+                    dst[dst_idx++] = src[i * s0 + j * s1];
+                }
+            }
+        }
+    }
+    // ========== 3D 特化 ==========
+    else if (ndim == 3) {
+        int64_t n0 = shape_[0], n1 = shape_[1], n2 = shape_[2];
+        int64_t s0 = strides_[0], s1 = strides_[1], s2 = strides_[2];
+
+        if (s2 == 1 && s1 == n2 && s0 == n1 * n2) {
+            // 完全连续
+            std::memcpy(dst, src, total_size * sizeof(float));
+        } else if (s2 == 1 && s1 == n2) {
+            // 平面连续
+            int64_t plane_size = n1 * n2;
+            for (int64_t i = 0; i < n0; ++i) {
+                std::memcpy(dst + i * plane_size, src + i * s0, plane_size * sizeof(float));
+            }
+        } else if (s2 == 1) {
+            // 行连续
+            int64_t dst_idx = 0;
+            for (int64_t i = 0; i < n0; ++i) {
+                for (int64_t j = 0; j < n1; ++j) {
+                    std::memcpy(dst + dst_idx, src + i * s0 + j * s1, n2 * sizeof(float));
+                    dst_idx += n2;
+                }
+            }
+        } else {
+            // 通用步进：硬编码三循环
+            int64_t dst_idx = 0;
+            for (int64_t i = 0; i < n0; ++i) {
+                for (int64_t j = 0; j < n1; ++j) {
+                    for (int64_t k = 0; k < n2; ++k) {
+                        dst[dst_idx++] = src[i * s0 + j * s1 + k * s2];
+                    }
+                }
+            }
+        }
+    }
+    // ========== 4D 特化 ==========
+    else if (ndim == 4) {
+        int64_t n0 = shape_[0], n1 = shape_[1], n2 = shape_[2], n3 = shape_[3];
+        int64_t s0 = strides_[0], s1 = strides_[1], s2 = strides_[2], s3 = strides_[3];
+
+        if (s3 == 1) {
+            // 最内层连续：批量 memcpy
+            int64_t dst_idx = 0;
+            for (int64_t i = 0; i < n0; ++i) {
+                for (int64_t j = 0; j < n1; ++j) {
+                    for (int64_t k = 0; k < n2; ++k) {
+                        std::memcpy(dst + dst_idx, src + i * s0 + j * s1 + k * s2, n3 * sizeof(float));
+                        dst_idx += n3;
+                    }
+                }
+            }
+        } else {
+            // 通用步进：硬编码四循环
+            int64_t dst_idx = 0;
+            for (int64_t i = 0; i < n0; ++i) {
+                for (int64_t j = 0; j < n1; ++j) {
+                    for (int64_t k = 0; k < n2; ++k) {
+                        for (int64_t l = 0; l < n3; ++l) {
+                            dst[dst_idx++] = src[i * s0 + j * s1 + k * s2 + l * s3];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // ========== 通用路径 (ndim > 4, 罕见) ==========
+    else {
+        // 找到最内层连续块
+        int64_t inner_size = 1;
+        int contiguous_dims = 0;
+        for (int i = ndim - 1; i >= 0; --i) {
+            if (strides_[i] == inner_size) {
+                inner_size *= shape_[i];
+                contiguous_dims++;
+            } else break;
         }
 
-        for (int64_t i = 0; i < shape_[dim]; ++i) {
-            indices[dim] = i;
-            copy_recursive(dim + 1, indices);
-        }
-    };
+        if (contiguous_dims == ndim) {
+            std::memcpy(dst, src, total_size * sizeof(float));
+        } else {
+            int64_t outer_size = total_size / inner_size;
+            int64_t block_bytes = inner_size * sizeof(float);
 
-    std::vector<int64_t> indices(shape_.size(), 0);
-    copy_recursive(0, indices);
+            for (int64_t o = 0; o < outer_size; ++o) {
+                int64_t src_offset = 0;
+                int64_t idx = o;
+                for (int d = ndim - contiguous_dims - 1; d >= 0; --d) {
+                    int64_t coord = idx % shape_[d];
+                    idx /= shape_[d];
+                    src_offset += coord * strides_[d];
+                }
+                std::memcpy(dst, src + src_offset, block_bytes);
+                dst += inner_size;
+            }
+        }
+    }
 
     return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
@@ -645,32 +765,55 @@ Tensor Tensor::add(const Tensor& other) const {
     check_cpu();
     other.check_cpu();
 
-    Tensor a = contiguous();
-    Tensor b = other.contiguous();
+    int64_t total = compute_size();
+    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    float* dst = static_cast<float*>(new_storage->data());
 
-    std::vector<float> result_data(compute_size());
-    const float* data1 = static_cast<const float*>(a.storage_->data()) + a.offset_;
-    const float* data2 = static_cast<const float*>(b.storage_->data()) + b.offset_;
+    // 快速路径：两者都是 contiguous
+    if (contiguous_ && other.contiguous_) {
+        const float* a = static_cast<const float*>(storage_->data()) + offset_;
+        const float* b = static_cast<const float*>(other.storage_->data()) + other.offset_;
 
-    for (int64_t i = 0; i < compute_size(); ++i) {
-        result_data[i] = data1[i] + data2[i];
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = a[i] + b[i];
+        }
+    } else {
+        // 慢速路径：使用 stride-based 访问
+        Tensor a_cont = contiguous();
+        Tensor b_cont = other.contiguous();
+        const float* a = static_cast<const float*>(a_cont.storage_->data()) + a_cont.offset_;
+        const float* b = static_cast<const float*>(b_cont.storage_->data()) + b_cont.offset_;
+
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = a[i] + b[i];
+        }
     }
 
-    return Tensor(std::move(result_data), shape_);
+    return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
 
 Tensor Tensor::add(float scalar) const {
     check_cpu();
-    Tensor a = contiguous();
 
-    std::vector<float> result_data(compute_size());
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    int64_t total = compute_size();
+    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    float* dst = static_cast<float*>(new_storage->data());
 
-    for (int64_t i = 0; i < compute_size(); ++i) {
-        result_data[i] = src[i] + scalar;
+    // 快速路径：contiguous
+    if (contiguous_) {
+        const float* src = static_cast<const float*>(storage_->data()) + offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = src[i] + scalar;
+        }
+    } else {
+        Tensor a = contiguous();
+        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = src[i] + scalar;
+        }
     }
 
-    return Tensor(std::move(result_data), shape_);
+    return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
 
 Tensor Tensor::sub(const Tensor& other) const {
@@ -681,32 +824,50 @@ Tensor Tensor::sub(const Tensor& other) const {
     check_cpu();
     other.check_cpu();
 
-    Tensor a = contiguous();
-    Tensor b = other.contiguous();
+    int64_t total = compute_size();
+    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    float* dst = static_cast<float*>(new_storage->data());
 
-    std::vector<float> result_data(compute_size());
-    const float* data1 = static_cast<const float*>(a.storage_->data()) + a.offset_;
-    const float* data2 = static_cast<const float*>(b.storage_->data()) + b.offset_;
-
-    for (int64_t i = 0; i < compute_size(); ++i) {
-        result_data[i] = data1[i] - data2[i];
+    if (contiguous_ && other.contiguous_) {
+        const float* a = static_cast<const float*>(storage_->data()) + offset_;
+        const float* b = static_cast<const float*>(other.storage_->data()) + other.offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = a[i] - b[i];
+        }
+    } else {
+        Tensor a_cont = contiguous();
+        Tensor b_cont = other.contiguous();
+        const float* a = static_cast<const float*>(a_cont.storage_->data()) + a_cont.offset_;
+        const float* b = static_cast<const float*>(b_cont.storage_->data()) + b_cont.offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = a[i] - b[i];
+        }
     }
 
-    return Tensor(std::move(result_data), shape_);
+    return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
 
 Tensor Tensor::sub(float scalar) const {
     check_cpu();
-    Tensor a = contiguous();
 
-    std::vector<float> result_data(compute_size());
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    int64_t total = compute_size();
+    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    float* dst = static_cast<float*>(new_storage->data());
 
-    for (int64_t i = 0; i < compute_size(); ++i) {
-        result_data[i] = src[i] - scalar;
+    if (contiguous_) {
+        const float* src = static_cast<const float*>(storage_->data()) + offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = src[i] - scalar;
+        }
+    } else {
+        Tensor a = contiguous();
+        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = src[i] - scalar;
+        }
     }
 
-    return Tensor(std::move(result_data), shape_);
+    return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
 
 Tensor Tensor::mul(const Tensor& other) const {
@@ -717,32 +878,50 @@ Tensor Tensor::mul(const Tensor& other) const {
     check_cpu();
     other.check_cpu();
 
-    Tensor a = contiguous();
-    Tensor b = other.contiguous();
+    int64_t total = compute_size();
+    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    float* dst = static_cast<float*>(new_storage->data());
 
-    std::vector<float> result_data(compute_size());
-    const float* data1 = static_cast<const float*>(a.storage_->data()) + a.offset_;
-    const float* data2 = static_cast<const float*>(b.storage_->data()) + b.offset_;
-
-    for (int64_t i = 0; i < compute_size(); ++i) {
-        result_data[i] = data1[i] * data2[i];
+    if (contiguous_ && other.contiguous_) {
+        const float* a = static_cast<const float*>(storage_->data()) + offset_;
+        const float* b = static_cast<const float*>(other.storage_->data()) + other.offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = a[i] * b[i];
+        }
+    } else {
+        Tensor a_cont = contiguous();
+        Tensor b_cont = other.contiguous();
+        const float* a = static_cast<const float*>(a_cont.storage_->data()) + a_cont.offset_;
+        const float* b = static_cast<const float*>(b_cont.storage_->data()) + b_cont.offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = a[i] * b[i];
+        }
     }
 
-    return Tensor(std::move(result_data), shape_);
+    return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
 
 Tensor Tensor::mul(float scalar) const {
     check_cpu();
-    Tensor a = contiguous();
 
-    std::vector<float> result_data(compute_size());
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    int64_t total = compute_size();
+    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    float* dst = static_cast<float*>(new_storage->data());
 
-    for (int64_t i = 0; i < compute_size(); ++i) {
-        result_data[i] = src[i] * scalar;
+    if (contiguous_) {
+        const float* src = static_cast<const float*>(storage_->data()) + offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = src[i] * scalar;
+        }
+    } else {
+        Tensor a = contiguous();
+        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = src[i] * scalar;
+        }
     }
 
-    return Tensor(std::move(result_data), shape_);
+    return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
 
 Tensor Tensor::div(const Tensor& other) const {
@@ -753,21 +932,33 @@ Tensor Tensor::div(const Tensor& other) const {
     check_cpu();
     other.check_cpu();
 
-    Tensor a = contiguous();
-    Tensor b = other.contiguous();
+    int64_t total = compute_size();
+    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    float* dst = static_cast<float*>(new_storage->data());
 
-    std::vector<float> result_data(compute_size());
-    const float* data1 = static_cast<const float*>(a.storage_->data()) + a.offset_;
-    const float* data2 = static_cast<const float*>(b.storage_->data()) + b.offset_;
-
-    for (int64_t i = 0; i < compute_size(); ++i) {
-        if (std::abs(data2[i]) < 1e-7f) {
-            throw std::runtime_error("Division by zero");
+    if (contiguous_ && other.contiguous_) {
+        const float* a = static_cast<const float*>(storage_->data()) + offset_;
+        const float* b = static_cast<const float*>(other.storage_->data()) + other.offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            if (std::abs(b[i]) < 1e-7f) {
+                throw std::runtime_error("Division by zero");
+            }
+            dst[i] = a[i] / b[i];
         }
-        result_data[i] = data1[i] / data2[i];
+    } else {
+        Tensor a_cont = contiguous();
+        Tensor b_cont = other.contiguous();
+        const float* a = static_cast<const float*>(a_cont.storage_->data()) + a_cont.offset_;
+        const float* b = static_cast<const float*>(b_cont.storage_->data()) + b_cont.offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            if (std::abs(b[i]) < 1e-7f) {
+                throw std::runtime_error("Division by zero");
+            }
+            dst[i] = a[i] / b[i];
+        }
     }
 
-    return Tensor(std::move(result_data), shape_);
+    return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
 
 Tensor Tensor::div(float scalar) const {
@@ -776,17 +967,105 @@ Tensor Tensor::div(float scalar) const {
     }
 
     check_cpu();
-    Tensor a = contiguous();
 
-    std::vector<float> result_data(compute_size());
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    int64_t total = compute_size();
+    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    float* dst = static_cast<float*>(new_storage->data());
     float inv_scalar = 1.0f / scalar;
 
-    for (int64_t i = 0; i < compute_size(); ++i) {
-        result_data[i] = src[i] * inv_scalar;
+    if (contiguous_) {
+        const float* src = static_cast<const float*>(storage_->data()) + offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = src[i] * inv_scalar;
+        }
+    } else {
+        Tensor a_cont = contiguous();
+        const float* src = static_cast<const float*>(a_cont.storage_->data()) + a_cont.offset_;
+        for (int64_t i = 0; i < total; ++i) {
+            dst[i] = src[i] * inv_scalar;
+        }
     }
 
-    return Tensor(std::move(result_data), shape_);
+    return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
+}
+
+// ========== In-place 操作 ==========
+
+Tensor& Tensor::add_(float scalar) {
+    check_cpu();
+    if (!contiguous_) {
+        throw std::runtime_error("In-place ops require contiguous tensor");
+    }
+
+    float* ptr = static_cast<float*>(storage_->data()) + offset_;
+    int64_t total = compute_size();
+
+    for (int64_t i = 0; i < total; ++i) {
+        ptr[i] += scalar;
+    }
+
+    return *this;
+}
+
+Tensor& Tensor::sub_(float scalar) {
+    check_cpu();
+    if (!contiguous_) {
+        throw std::runtime_error("In-place ops require contiguous tensor");
+    }
+
+    float* ptr = static_cast<float*>(storage_->data()) + offset_;
+    int64_t total = compute_size();
+
+    for (int64_t i = 0; i < total; ++i) {
+        ptr[i] -= scalar;
+    }
+
+    return *this;
+}
+
+Tensor& Tensor::mul_(float scalar) {
+    check_cpu();
+    if (!contiguous_) {
+        throw std::runtime_error("In-place ops require contiguous tensor");
+    }
+
+    float* ptr = static_cast<float*>(storage_->data()) + offset_;
+    int64_t total = compute_size();
+
+    // 循环展开
+    int64_t i = 0;
+    for (; i + 4 <= total; i += 4) {
+        ptr[i] *= scalar;
+        ptr[i+1] *= scalar;
+        ptr[i+2] *= scalar;
+        ptr[i+3] *= scalar;
+    }
+    for (; i < total; ++i) {
+        ptr[i] *= scalar;
+    }
+
+    return *this;
+}
+
+Tensor& Tensor::div_(float scalar) {
+    if (std::abs(scalar) < 1e-7f) {
+        throw std::runtime_error("Division by zero");
+    }
+
+    check_cpu();
+    if (!contiguous_) {
+        throw std::runtime_error("In-place ops require contiguous tensor");
+    }
+
+    float* ptr = static_cast<float*>(storage_->data()) + offset_;
+    int64_t total = compute_size();
+    float inv_scalar = 1.0f / scalar;
+
+    for (int64_t i = 0; i < total; ++i) {
+        ptr[i] *= inv_scalar;
+    }
+
+    return *this;
 }
 
 // ========== Activation 函数 ==========
@@ -1453,6 +1732,82 @@ LuaIntf::LuaRef Tensor::argmin_lua(lua_State* L, int axis) const {
             result[lua_idx++] = min_pos;
         }
     }
+
+    return result;
+}
+
+// ========== Max with Argmax (Fused) ==========
+
+LuaIntf::LuaRef Tensor::max_with_argmax(lua_State* L, int axis) const {
+    check_cpu();
+    Tensor a = contiguous();
+
+    int ax = axis;
+    if (ax < 0) ax += shape_.size();
+    if (ax < 0 || ax >= static_cast<int>(shape_.size())) {
+        throw std::runtime_error("Axis out of range");
+    }
+
+    // 计算维度
+    std::vector<int64_t> new_shape;
+    for (int i = 0; i < static_cast<int>(shape_.size()); ++i) {
+        if (i != ax) {
+            new_shape.push_back(shape_[i]);
+        }
+    }
+    if (new_shape.empty()) new_shape.push_back(1);
+
+    int64_t outer_size = 1;
+    for (int i = 0; i < ax; ++i) {
+        outer_size *= shape_[i];
+    }
+    int64_t axis_size = shape_[ax];
+    int64_t inner_size = 1;
+    for (int i = ax + 1; i < static_cast<int>(shape_.size()); ++i) {
+        inner_size *= shape_[i];
+    }
+
+    int64_t result_size = outer_size * inner_size;
+
+    // 预分配结果
+    std::vector<float> max_values(result_size);
+    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+
+    // 预分配 Lua table
+    lua_createtable(L, static_cast<int>(result_size), 0);
+    LuaIntf::LuaRef indices = LuaIntf::LuaRef::popFromStack(L);
+
+    int lua_idx = 1;
+
+    // 单次遍历，同时计算 max 和 argmax
+    for (int64_t i = 0; i < outer_size; ++i) {
+        for (int64_t k = 0; k < inner_size; ++k) {
+            int64_t result_idx = i * inner_size + k;
+            int64_t src_idx = (i * axis_size + 0) * inner_size + k;
+
+            float max_val = src[src_idx];
+            int64_t max_pos = 0;
+
+            for (int64_t j = 1; j < axis_size; ++j) {
+                src_idx = (i * axis_size + j) * inner_size + k;
+                if (src[src_idx] > max_val) {
+                    max_val = src[src_idx];
+                    max_pos = j;
+                }
+            }
+
+            max_values[result_idx] = max_val;
+            indices[lua_idx++] = max_pos;
+        }
+    }
+
+    // 创建结果 Tensor
+    Tensor max_tensor(std::move(max_values), new_shape);
+
+    // 返回 {values = Tensor, indices = table}
+    LuaIntf::LuaRef result = LuaIntf::LuaRef::createTable(L);
+    result["values"] = max_tensor;
+    result["indices"] = indices;
 
     return result;
 }
