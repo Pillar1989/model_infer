@@ -50,11 +50,13 @@ set_target_properties(onnxruntime PROPERTIES
 # ==========================================================
 # 收集模块源文件
 file(GLOB MODULE_SOURCES "src/modules/*.cpp")
+file(GLOB TENSOR_SOURCES "src/modules/tensor/*.cpp")
 file(GLOB BINDING_SOURCES "src/bindings/*.cpp")
 
-add_executable(model_infer 
+add_executable(model_infer
     src/main.cpp
     ${MODULE_SOURCES}
+    ${TENSOR_SOURCES}
     ${BINDING_SOURCES}
 )
 
@@ -65,9 +67,10 @@ target_link_libraries(model_infer PRIVATE
     onnxruntime
 )
 
-target_include_directories(model_infer PRIVATE 
+target_include_directories(model_infer PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/tensor"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/bindings"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/utils"
     ${OpenCV_INCLUDE_DIRS}
@@ -104,9 +107,10 @@ set_target_properties(cpp_infer PROPERTIES
 # ==========================================================
 # 6. Tensor API Test Program
 # ==========================================================
-add_executable(test_tensor 
+add_executable(test_tensor
     src/test_main.cpp
     ${MODULE_SOURCES}
+    ${TENSOR_SOURCES}
     ${BINDING_SOURCES}
 )
 
@@ -117,9 +121,10 @@ target_link_libraries(test_tensor PRIVATE
     onnxruntime
 )
 
-target_include_directories(test_tensor PRIVATE 
+target_include_directories(test_tensor PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/tensor"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/bindings"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/utils"
     ${OpenCV_INCLUDE_DIRS}
@@ -134,3 +139,4 @@ set_target_properties(test_tensor PROPERTIES
     BUILD_RPATH "${ONNXRUNTIME_LIB_DIR}"
     INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}"
 )
+
