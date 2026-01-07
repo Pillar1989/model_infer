@@ -53,10 +53,10 @@ echo "Benchmark Results - $(date)" > "$RESULTS_FILE"
 echo "Iterations: $ITERATIONS" >> "$RESULTS_FILE"
 echo "========================================" >> "$RESULTS_FILE"
 
-# Function to measure execution time and extract detection count
-measure_time_and_accuracy() {
+# Function to measure execution time and save full output for accuracy validation
+measure_time_and_save_output() {
     local cmd="$1"
-    local output_file=$(mktemp)
+    local output_file="$2"
 
     local start_ns=$(date +%s%N)
     eval "$cmd" > "$output_file" 2>&1
@@ -64,17 +64,22 @@ measure_time_and_accuracy() {
     local end_ns=$(date +%s%N)
 
     if [ $exit_code -ne 0 ]; then
-        rm -f "$output_file"
-        echo "-1,0"
+        echo "-1"
         return 1
     fi
 
     # Calculate time in milliseconds
     local elapsed_ns=$((end_ns - start_ns))
     local elapsed_ms=$((elapsed_ns / 1000000))
+    echo "$elapsed_ms"
+}
 
-    # Extract detection count from output
-    # Looking for patterns like "Total: N detections" or "NMS后最终框: N"
+# Function to extract detection info from output
+extract_detection_info() {
+    local output_file="$1"
+    local info_file="$2"
+
+    # Extract detection count
     local detection_count=0
     if grep -q "Total:.*detections" "$output_file"; then
         detection_count=$(grep "Total:.*detections" "$output_file" | grep -oP '\d+(?= detections)')
@@ -82,8 +87,11 @@ measure_time_and_accuracy() {
         detection_count=$(grep "NMS后最终框:" "$output_file" | grep -oP '(?<=: )\d+')
     fi
 
-    rm -f "$output_file"
-    echo "$elapsed_ms,$detection_count"
+    # Extract bounding boxes and labels
+    # Pattern: "Box N: label (x, y, w, h) conf=score"
+    grep -E "^Box [0-9]+:" "$output_file" | sort > "$info_file"
+
+    echo "$detection_count"
 }
 
 # Run tests
@@ -118,9 +126,22 @@ for test_config in "${TESTS[@]}"; do
     detections=()
     cmd="\"$BUILD_DIR/model_infer\" \"$script_path\" \"$model_path\" \"$image_path\""
 
+    # Save first run output for accuracy validation
+    first_output_file="$PROJECT_DIR/.bench_output_$$_$(echo "$script" | sed 's/[^a-zA-Z0-9]/_/g')"
+    first_info_file="${first_output_file}.info"
+
     for i in $(seq 1 $ITERATIONS); do
-        result=$(measure_time_and_accuracy "$cmd")
-        IFS=',' read -r time_ms det_count <<< "$result"
+        if [ $i -eq 1 ]; then
+            # First run: save full output
+            time_ms=$(measure_time_and_save_output "$cmd" "$first_output_file")
+            det_count=$(extract_detection_info "$first_output_file" "$first_info_file")
+        else
+            # Subsequent runs: discard output
+            output_tmp=$(mktemp)
+            time_ms=$(measure_time_and_save_output "$cmd" "$output_tmp")
+            det_count=$(extract_detection_info "$output_tmp" "/dev/null")
+            rm -f "$output_tmp"
+        fi
 
         if [ "$time_ms" = "-1" ]; then
             echo -e "${RED}[FAIL]${NC} Iteration $i failed"
@@ -179,9 +200,21 @@ if [ -f "$BUILD_DIR/cpp_infer" ]; then
     detections=()
     cmd="\"$BUILD_DIR/cpp_infer\" \"$MODEL_DIR/yolov5n.onnx\" \"$IMAGE_DIR/zidane.jpg\""
 
+    # Save first run output
+    first_output_file="$PROJECT_DIR/.bench_output_$$_cpp_infer"
+    first_info_file="${first_output_file}.info"
+
     for i in $(seq 1 $ITERATIONS); do
-        result=$(measure_time_and_accuracy "$cmd")
-        IFS=',' read -r time_ms det_count <<< "$result"
+        if [ $i -eq 1 ]; then
+            time_ms=$(measure_time_and_save_output "$cmd" "$first_output_file")
+            det_count=$(extract_detection_info "$first_output_file" "$first_info_file")
+        else
+            output_tmp=$(mktemp)
+            time_ms=$(measure_time_and_save_output "$cmd" "$output_tmp")
+            det_count=$(extract_detection_info "$output_tmp" "/dev/null")
+            rm -f "$output_tmp"
+        fi
+
         if [ "$time_ms" != "-1" ]; then
             times+=("$time_ms")
             detections+=("$det_count")
@@ -212,46 +245,84 @@ echo "========================================"
 echo "  Accuracy Validation"
 echo "========================================"
 
-# Extract detection counts for comparison
+# Helper function to compare detection outputs
+compare_detections() {
+    local file1="$1"
+    local file2="$2"
+    local name1="$3"
+    local name2="$4"
+
+    if [ ! -f "$file1" ] || [ ! -f "$file2" ]; then
+        echo -e "${YELLOW}⊘${NC} Cannot compare $name1 vs $name2 - files missing"
+        return 1
+    fi
+
+    local count1=$(wc -l < "$file1")
+    local count2=$(wc -l < "$file2")
+
+    if [ "$count1" != "$count2" ]; then
+        echo -e "${RED}✗${NC} $name1 vs $name2: Different counts ($count1 vs $count2)"
+        return 1
+    fi
+
+    # Compare detection boxes using diff
+    local diff_output=$(diff "$file1" "$file2" 2>/dev/null)
+    if [ -z "$diff_output" ]; then
+        echo -e "${GREEN}✓${NC} $name1 vs $name2: Identical ($count1 detections)"
+        return 0
+    else
+        # Show first few differences
+        echo -e "${YELLOW}△${NC} $name1 vs $name2: Same count but different boxes"
+        echo "  First difference:"
+        echo "$diff_output" | head -6 | sed 's/^/    /'
+        return 1
+    fi
+}
+
+# Extract detection counts for quick comparison
+echo "Detection Counts:"
 yolo11n_tensor=$(grep "YOLO11n Detection (Tensor API)" "$RESULTS_FILE" | grep -oP 'detections=\K\d+' || echo "N/A")
 yolo11n_legacy=$(grep "YOLO11n Detection (Legacy)" "$RESULTS_FILE" | grep -oP 'detections=\K\d+' || echo "N/A")
 yolov5n_tensor=$(grep "YOLOv5n Detection (Tensor API)" "$RESULTS_FILE" | grep -oP 'detections=\K\d+' || echo "N/A")
 yolov5n_legacy=$(grep "YOLOv5n Detection (Legacy)" "$RESULTS_FILE" | grep -oP 'detections=\K\d+' || echo "N/A")
 cpp_baseline=$(grep "C++ Baseline" "$RESULTS_FILE" | grep -oP 'detections=\K\d+' || echo "N/A")
 
-echo "Detection count comparison (same image, same model):"
-echo "  YOLO11n Tensor API:  $yolo11n_tensor"
-echo "  YOLO11n Legacy:      $yolo11n_legacy"
-echo ""
-echo "  YOLOv5n Tensor API:  $yolov5n_tensor"
-echo "  YOLOv5n Legacy:      $yolov5n_legacy"
-echo "  YOLOv5n C++ Baseline: $cpp_baseline"
+echo "  YOLO11n Tensor: $yolo11n_tensor | Legacy: $yolo11n_legacy"
+echo "  YOLOv5n Tensor: $yolov5n_tensor | Legacy: $yolov5n_legacy | C++: $cpp_baseline"
 echo ""
 
-# Check consistency
+# Detailed comparison using saved detection info
+echo "Detailed Box Comparison:"
 all_consistent=true
 
-if [ "$yolo11n_tensor" != "N/A" ] && [ "$yolo11n_legacy" != "N/A" ]; then
-    if [ "$yolo11n_tensor" = "$yolo11n_legacy" ]; then
-        echo -e "${GREEN}✓${NC} YOLO11n implementations are consistent"
-    else
-        echo -e "${RED}✗${NC} YOLO11n implementations differ: Tensor=$yolo11n_tensor vs Legacy=$yolo11n_legacy"
-        all_consistent=false
-    fi
+# YOLO11n: Tensor vs Legacy
+yolo11n_tensor_info="$PROJECT_DIR/.bench_output_$$_yolo11_tensor_detector_lua.info"
+yolo11n_legacy_info="$PROJECT_DIR/.bench_output_$$_yolo11_detector_lua.info"
+if ! compare_detections "$yolo11n_tensor_info" "$yolo11n_legacy_info" "YOLO11n Tensor" "YOLO11n Legacy"; then
+    all_consistent=false
 fi
 
-if [ "$yolov5n_tensor" != "N/A" ] && [ "$yolov5n_legacy" != "N/A" ] && [ "$cpp_baseline" != "N/A" ]; then
-    if [ "$yolov5n_tensor" = "$yolov5n_legacy" ] && [ "$yolov5n_legacy" = "$cpp_baseline" ]; then
-        echo -e "${GREEN}✓${NC} YOLOv5n implementations are consistent"
-    else
-        echo -e "${RED}✗${NC} YOLOv5n implementations differ: Tensor=$yolov5n_tensor Legacy=$yolov5n_legacy C++=$cpp_baseline"
-        all_consistent=false
-    fi
+# YOLOv5n: Tensor vs Legacy
+yolov5n_tensor_info="$PROJECT_DIR/.bench_output_$$_yolov5_tensor_detector_lua.info"
+yolov5n_legacy_info="$PROJECT_DIR/.bench_output_$$_yolov5_detector_lua.info"
+if ! compare_detections "$yolov5n_tensor_info" "$yolov5n_legacy_info" "YOLOv5n Tensor" "YOLOv5n Legacy"; then
+    all_consistent=false
+fi
+
+# YOLOv5n: Tensor vs C++
+cpp_info="$PROJECT_DIR/.bench_output_$$_cpp_infer.info"
+if ! compare_detections "$yolov5n_tensor_info" "$cpp_info" "YOLOv5n Tensor" "C++ Baseline"; then
+    all_consistent=false
 fi
 
 echo ""
 if [ "$all_consistent" = true ]; then
-    echo -e "${GREEN}Overall: All implementations produce consistent detection results${NC}"
+    echo -e "${GREEN}Overall: All implementations produce identical detection results${NC}"
 else
-    echo -e "${YELLOW}Overall: Some inconsistencies detected - review above${NC}"
+    echo -e "${YELLOW}Overall: Minor differences detected - verify thresholds and NMS params${NC}"
 fi
+
+# Cleanup temporary files
+echo ""
+echo "Cleaning up temporary files..."
+rm -f "$PROJECT_DIR"/.bench_output_$$_* 2>/dev/null || true
