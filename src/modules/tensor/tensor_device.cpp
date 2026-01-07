@@ -35,7 +35,7 @@ Tensor Tensor::contiguous() const {
 
 // ========== 异步设备操作 ==========
 
-Tensor Tensor::to_async(DeviceType device, Stream* stream) const {
+Tensor Tensor::to_async(DeviceType device, SyncHandle* handle) const {
     if (buffer_->device() == device) {
         return *this;
     }
@@ -47,20 +47,20 @@ Tensor Tensor::to_async(DeviceType device, Stream* stream) const {
     auto new_storage = DeviceBuffer::allocate(cont.buffer_->size_bytes(), device);
 
     // 异步复制数据
-    cont.buffer_->copy_to_async(new_storage.get(), stream);
+    cont.buffer_->copy_to_async(new_storage.get(), handle);
 
     return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
 
-void Tensor::sync(Stream* stream) const {
-    buffer_->sync(stream);
+void Tensor::sync(SyncHandle* handle) const {
+    buffer_->sync(handle);
 }
 
-bool Tensor::is_ready(Stream* stream) const {
-    if (stream) {
-        return stream->is_idle();
+bool Tensor::is_ready(SyncHandle* handle) const {
+    if (handle) {
+        return handle->is_idle();
     }
-    // 无流时默认已就绪（CPU 同步执行）
+    // 无句柄时默认已就绪（CPU 同步执行）
     return true;
 }
 

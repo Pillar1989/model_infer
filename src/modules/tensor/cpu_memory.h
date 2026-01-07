@@ -57,9 +57,9 @@ public:
 
     // ========== 异步接口（CPU 实现为同步降级） ==========
 
-    void copy_to_async(DeviceBuffer* dst, Stream* stream = nullptr) const override;
-    void copy_from_async(const DeviceBuffer* src, Stream* stream = nullptr) override;
-    void sync(Stream* stream = nullptr) const override;
+    void copy_to_async(DeviceBuffer* dst, SyncHandle* handle = nullptr) const override;
+    void copy_from_async(const DeviceBuffer* src, SyncHandle* handle = nullptr) override;
+    void sync(SyncHandle* handle = nullptr) const override;
     bool supports_async() const override;
 
 private:

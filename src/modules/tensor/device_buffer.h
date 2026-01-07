@@ -7,7 +7,7 @@
 namespace tensor {
 
 // 前向声明
-class Stream;
+class SyncHandle;
 
 /**
  * DeviceBuffer - 设备缓冲区抽象基类
@@ -75,24 +75,24 @@ public:
     /**
      * 异步复制数据到目标缓冲区
      * @param dst 目标缓冲区（可以是不同设备）
-     * @param stream 异步流（nullptr 表示使用默认流）
+     * @param handle 同步句柄（nullptr 表示使用默认句柄）
      *
-     * 注意：调用者需要在访问 dst 数据前调用 stream->synchronize()
+     * 注意：调用者需要在访问 dst 数据前调用 handle->synchronize()
      */
-    virtual void copy_to_async(DeviceBuffer* dst, Stream* stream = nullptr) const = 0;
+    virtual void copy_to_async(DeviceBuffer* dst, SyncHandle* handle = nullptr) const = 0;
 
     /**
      * 异步从源缓冲区复制数据
      * @param src 源缓冲区（可以是不同设备）
-     * @param stream 异步流（nullptr 表示使用默认流）
+     * @param handle 同步句柄（nullptr 表示使用默认句柄）
      */
-    virtual void copy_from_async(const DeviceBuffer* src, Stream* stream = nullptr) = 0;
+    virtual void copy_from_async(const DeviceBuffer* src, SyncHandle* handle = nullptr) = 0;
 
     /**
      * 同步等待所有挂起的异步操作完成
-     * @param stream 要同步的流（nullptr 表示默认流）
+     * @param handle 要同步的句柄（nullptr 表示默认句柄）
      */
-    virtual void sync(Stream* stream = nullptr) const = 0;
+    virtual void sync(SyncHandle* handle = nullptr) const = 0;
 
     /**
      * 检查是否支持异步操作

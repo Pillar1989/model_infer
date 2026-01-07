@@ -23,7 +23,7 @@ make
 ./build/model_infer scripts/yolo11_detector.lua models/yolo11n.onnx video.mp4 show save=out.mp4 frames=100
 
 # Rebuild after changes
-cd build && make -j$(nproc)
+cd build && make -j8
 ```
 
 ## Architecture Overview
@@ -369,7 +369,7 @@ src/
   │       ├── device_buffer.h/cpp       # DeviceBuffer abstract interface
   │       ├── cpu_memory.h/cpp          # CpuMemory implementation
   │       ├── device_type.h             # Device enum (CPU/NPU/TPU)
-  │       ├── stream.h/cpp              # Async stream abstraction
+  │       ├── sync_handle.h/cpp         # SyncHandle for async operations
   │       ├── tensor_core.cpp           # Constructors, data access
   │       ├── tensor_device.cpp         # Device ops (to, contiguous, view)
   │       ├── tensor_shape.cpp          # Shape ops (slice, reshape, transpose)

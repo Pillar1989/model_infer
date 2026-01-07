@@ -9,7 +9,7 @@
 
 #include "device_type.h"
 #include "device_buffer.h"
-#include "stream.h"
+#include "sync_handle.h"
 
 // 前向声明 Lua 相关类型
 struct lua_State;
@@ -154,13 +154,13 @@ public:
     Tensor contiguous() const;
 
     /// 异步迁移到指定设备
-    Tensor to_async(DeviceType device, Stream* stream = nullptr) const;
+    Tensor to_async(DeviceType device, SyncHandle* handle = nullptr) const;
 
     /// 同步等待异步操作完成
-    void sync(Stream* stream = nullptr) const;
+    void sync(SyncHandle* handle = nullptr) const;
 
     /// 检查数据是否就绪 (非阻塞)
-    bool is_ready(Stream* stream = nullptr) const;
+    bool is_ready(SyncHandle* handle = nullptr) const;
 
     /// 零拷贝视图 (向后兼容)
     LuaIntf::TensorView<float> view();

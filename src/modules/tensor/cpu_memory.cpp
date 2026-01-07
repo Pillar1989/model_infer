@@ -142,21 +142,21 @@ void CpuMemory::copy_from(const DeviceBuffer* src) {
 
 // ========== 异步接口实现（CPU 同步降级） ==========
 
-void CpuMemory::copy_to_async(DeviceBuffer* dst, Stream* stream) const {
-    // CPU 实现：直接同步执行，忽略 stream
-    (void)stream;  // 忽略未使用参数
+void CpuMemory::copy_to_async(DeviceBuffer* dst, SyncHandle* handle) const {
+    // CPU 实现：直接同步执行，忽略 handle
+    (void)handle;  // 忽略未使用参数
     copy_to(dst);
 }
 
-void CpuMemory::copy_from_async(const DeviceBuffer* src, Stream* stream) {
-    // CPU 实现：直接同步执行，忽略 stream
-    (void)stream;  // 忽略未使用参数
+void CpuMemory::copy_from_async(const DeviceBuffer* src, SyncHandle* handle) {
+    // CPU 实现：直接同步执行，忽略 handle
+    (void)handle;  // 忽略未使用参数
     copy_from(src);
 }
 
-void CpuMemory::sync(Stream* stream) const {
+void CpuMemory::sync(SyncHandle* handle) const {
     // CPU 操作同步执行，无需等待
-    (void)stream;  // 忽略未使用参数
+    (void)handle;  // 忽略未使用参数
 }
 
 bool CpuMemory::supports_async() const {
