@@ -1,5 +1,5 @@
 #include "tensor.h"
-#include "cpu_storage.h"
+#include "cpu_memory.h"
 #include <algorithm>
 #include <numeric>
 #include <cmath>
@@ -20,7 +20,7 @@ float Tensor::get_item(const std::vector<int64_t>& indices) const {
 void Tensor::set_item(const std::vector<int64_t>& indices, float value) {
     check_cpu();
     int64_t offset = compute_offset(indices);
-    float* ptr = static_cast<float*>(storage_->data());
+    float* ptr = static_cast<float*>(buffer_->data());
     ptr[offset] = value;
 }
 
@@ -33,10 +33,10 @@ std::string Tensor::to_string(int max_elements) const {
     }
     oss << "]";
 
-    if (storage_->device() == DeviceType::CPU) {
+    if (buffer_->device() == DeviceType::CPU) {
         oss << ", data=[";
         Tensor cont = contiguous();
-        const float* ptr = static_cast<const float*>(cont.storage_->data()) + cont.offset_;
+        const float* ptr = static_cast<const float*>(cont.buffer_->data()) + cont.offset_;
         int64_t total = compute_size();
         int64_t show = std::min(static_cast<int64_t>(max_elements), total);
 
@@ -50,7 +50,7 @@ std::string Tensor::to_string(int max_elements) const {
         oss << "]";
     }
 
-    oss << ", device=" << device_type_to_string(storage_->device()) << ")";
+    oss << ", device=" << device_type_to_string(buffer_->device()) << ")";
     return oss.str();
 }
 
@@ -62,7 +62,7 @@ Tensor Tensor::sum(int axis, bool keepdims) const {
 
     if (axis == -1) {
         float total = 0.0f;
-        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
         for (int64_t i = 0; i < compute_size(); ++i) {
             total += src[i];
         }
@@ -102,7 +102,7 @@ Tensor Tensor::sum(int axis, bool keepdims) const {
     }
 
     std::vector<float> result_data(outer_size * inner_size, 0.0f);
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     for (int64_t i = 0; i < outer_size; ++i) {
         for (int64_t j = 0; j < axis_size; ++j) {
@@ -137,7 +137,7 @@ Tensor Tensor::max(int axis, bool keepdims) const {
     Tensor a = contiguous();
 
     if (axis == -1) {
-        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
         float max_val = src[0];
         for (int64_t i = 1; i < compute_size(); ++i) {
             max_val = std::max(max_val, src[i]);
@@ -178,7 +178,7 @@ Tensor Tensor::max(int axis, bool keepdims) const {
     }
 
     std::vector<float> result_data(outer_size * inner_size);
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     for (int64_t i = 0; i < outer_size; ++i) {
         for (int64_t k = 0; k < inner_size; ++k) {
@@ -203,7 +203,7 @@ Tensor Tensor::min(int axis, bool keepdims) const {
     Tensor a = contiguous();
 
     if (axis == -1) {
-        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
         float min_val = src[0];
         for (int64_t i = 1; i < compute_size(); ++i) {
             min_val = std::min(min_val, src[i]);
@@ -244,7 +244,7 @@ Tensor Tensor::min(int axis, bool keepdims) const {
     }
 
     std::vector<float> result_data(outer_size * inner_size);
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     for (int64_t i = 0; i < outer_size; ++i) {
         for (int64_t k = 0; k < inner_size; ++k) {
@@ -273,7 +273,7 @@ LuaIntf::LuaRef Tensor::argmax_lua(lua_State* L, int axis) const {
     Tensor a = contiguous();
 
     if (axis == -1) {
-        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
         int64_t max_idx = 0;
         float max_val = src[0];
 
@@ -303,7 +303,7 @@ LuaIntf::LuaRef Tensor::argmax_lua(lua_State* L, int axis) const {
         inner_size *= shape_[i];
     }
 
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
     LuaIntf::LuaRef result = LuaIntf::LuaRef::createTable(L);
     int lua_idx = 1;
 
@@ -333,7 +333,7 @@ LuaIntf::LuaRef Tensor::argmin_lua(lua_State* L, int axis) const {
     Tensor a = contiguous();
 
     if (axis == -1) {
-        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
         int64_t min_idx = 0;
         float min_val = src[0];
 
@@ -360,7 +360,7 @@ LuaIntf::LuaRef Tensor::argmin_lua(lua_State* L, int axis) const {
         inner_size *= shape_[i];
     }
 
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
     LuaIntf::LuaRef result = LuaIntf::LuaRef::createTable(L);
     int lua_idx = 1;
 
@@ -420,7 +420,7 @@ LuaIntf::LuaRef Tensor::max_with_argmax(lua_State* L, int axis) const {
 
     // 预分配结果
     std::vector<float> max_values(result_size);
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     // 预分配 Lua table
     lua_createtable(L, static_cast<int>(result_size), 0);

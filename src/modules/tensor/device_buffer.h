@@ -10,17 +10,17 @@ namespace tensor {
 class Stream;
 
 /**
- * TensorStorage - 内存抽象基类
+ * DeviceBuffer - 设备缓冲区抽象基类
  *
- * 提供设备无关的内存管理接口，支持：
- * - 多设备内存管理 (CPU, NPU, TPU)
+ * 提供设备无关的数据缓冲区接口，支持：
+ * - 多设备缓冲区管理 (CPU, NPU, TPU)
  * - 内存对齐要求
  * - 零拷贝引用外部内存
  * - 设备间数据传输
  */
-class TensorStorage {
+class DeviceBuffer {
 public:
-    virtual ~TensorStorage() = default;
+    virtual ~DeviceBuffer() = default;
 
     // ========== 数据访问 ==========
 
@@ -59,34 +59,34 @@ public:
     // ========== 数据传输 ==========
 
     /**
-     * 复制数据到目标存储
-     * @param dst 目标存储（可以是不同设备）
+     * 复制数据到目标缓冲区
+     * @param dst 目标缓冲区（可以是不同设备）
      */
-    virtual void copy_to(TensorStorage* dst) const = 0;
+    virtual void copy_to(DeviceBuffer* dst) const = 0;
 
     /**
-     * 从源存储复制数据
-     * @param src 源存储（可以是不同设备）
+     * 从源缓冲区复制数据
+     * @param src 源缓冲区（可以是不同设备）
      */
-    virtual void copy_from(const TensorStorage* src) = 0;
+    virtual void copy_from(const DeviceBuffer* src) = 0;
 
     // ========== 异步数据传输 ==========
 
     /**
-     * 异步复制数据到目标存储
-     * @param dst 目标存储（可以是不同设备）
+     * 异步复制数据到目标缓冲区
+     * @param dst 目标缓冲区（可以是不同设备）
      * @param stream 异步流（nullptr 表示使用默认流）
      *
      * 注意：调用者需要在访问 dst 数据前调用 stream->synchronize()
      */
-    virtual void copy_to_async(TensorStorage* dst, Stream* stream = nullptr) const = 0;
+    virtual void copy_to_async(DeviceBuffer* dst, Stream* stream = nullptr) const = 0;
 
     /**
-     * 异步从源存储复制数据
-     * @param src 源存储（可以是不同设备）
+     * 异步从源缓冲区复制数据
+     * @param src 源缓冲区（可以是不同设备）
      * @param stream 异步流（nullptr 表示使用默认流）
      */
-    virtual void copy_from_async(const TensorStorage* src, Stream* stream = nullptr) = 0;
+    virtual void copy_from_async(const DeviceBuffer* src, Stream* stream = nullptr) = 0;
 
     /**
      * 同步等待所有挂起的异步操作完成
@@ -103,12 +103,12 @@ public:
     // ========== 工厂方法 ==========
 
     /**
-     * 分配指定大小的存储
+     * 分配指定大小的缓冲区
      * @param size_bytes 字节数
      * @param device 设备类型（默认 CPU）
      * @param alignment 对齐要求（默认 64 字节）
      */
-    static std::shared_ptr<TensorStorage> allocate(
+    static std::shared_ptr<DeviceBuffer> allocate(
         size_t size_bytes,
         DeviceType device = DeviceType::CPU,
         size_t alignment = 64
@@ -121,7 +121,7 @@ public:
      * @param device 设备类型
      * @param take_ownership 是否接管所有权
      */
-    static std::shared_ptr<TensorStorage> from_external(
+    static std::shared_ptr<DeviceBuffer> from_external(
         void* ptr,
         size_t size_bytes,
         DeviceType device = DeviceType::CPU,

@@ -1,5 +1,5 @@
 #include "tensor.h"
-#include "cpu_storage.h"
+#include "cpu_memory.h"
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
@@ -18,8 +18,8 @@ Tensor::Tensor(const std::vector<float>& data, const std::vector<int64_t>& shape
     , contiguous_(true)
     , device_cache_(DeviceType::CPU) {
     // 分配 CPU Storage 并复制数据
-    storage_ = CpuStorage::allocate(data.size() * sizeof(float));
-    std::memcpy(storage_->data(), data.data(), data.size() * sizeof(float));
+    buffer_ = CpuMemory::allocate(data.size() * sizeof(float));
+    std::memcpy(buffer_->data(), data.data(), data.size() * sizeof(float));
 }
 
 Tensor::Tensor(std::vector<float>&& data, const std::vector<int64_t>& shape)
@@ -29,33 +29,33 @@ Tensor::Tensor(std::vector<float>&& data, const std::vector<int64_t>& shape)
     , contiguous_(true)
     , device_cache_(DeviceType::CPU) {
     // 分配 CPU Storage 并移动数据
-    storage_ = CpuStorage::allocate(data.size() * sizeof(float));
-    std::memcpy(storage_->data(), data.data(), data.size() * sizeof(float));
+    buffer_ = CpuMemory::allocate(data.size() * sizeof(float));
+    std::memcpy(buffer_->data(), data.data(), data.size() * sizeof(float));
 }
 
 Tensor::Tensor(const float* data, const std::vector<int64_t>& shape,
-               std::shared_ptr<TensorStorage> owner)
+               std::shared_ptr<DeviceBuffer> owner)
     : shape_(shape)
     , strides_(compute_strides(shape))
     , offset_(0)
     , contiguous_(true)
     , device_cache_(DeviceType::CPU) {
     if (owner) {
-        storage_ = owner;
-        device_cache_ = storage_->device();  // 更新为实际设备类型
+        buffer_ = owner;
+        device_cache_ = buffer_->device();  // 更新为实际设备类型
     } else {
         int64_t total_size = compute_size();
-        storage_ = CpuStorage::allocate(total_size * sizeof(float));
-        std::memcpy(storage_->data(), data, total_size * sizeof(float));
+        buffer_ = CpuMemory::allocate(total_size * sizeof(float));
+        std::memcpy(buffer_->data(), data, total_size * sizeof(float));
     }
 }
 
-Tensor::Tensor(std::shared_ptr<TensorStorage> storage,
+Tensor::Tensor(std::shared_ptr<DeviceBuffer> storage,
                const std::vector<int64_t>& shape,
                const std::vector<int64_t>& strides,
                int64_t offset,
                bool contiguous)
-    : storage_(storage)
+    : buffer_(storage)
     , shape_(shape)
     , strides_(strides)
     , offset_(offset)
@@ -159,7 +159,7 @@ LuaIntf::LuaRef Tensor::extract_columns_lua(lua_State* L, const std::vector<int6
     int64_t src_cols = shape_[1];
 
     // 使用 stride-based 访问，避免 contiguous() 调用
-    const float* base = static_cast<const float*>(storage_->data()) + offset_;
+    const float* base = static_cast<const float*>(buffer_->data()) + offset_;
     int64_t s0 = strides_[0];
     int64_t s1 = strides_[1];
 
@@ -241,22 +241,22 @@ int64_t Tensor::compute_offset(const std::vector<int64_t>& indices) const {
 
 const float* Tensor::raw_data() const {
     check_cpu();
-    return static_cast<const float*>(storage_->data());
+    return static_cast<const float*>(buffer_->data());
 }
 
 float* Tensor::raw_data() {
     check_cpu();
-    return static_cast<float*>(storage_->data());
+    return static_cast<float*>(buffer_->data());
 }
 
 const float* Tensor::data() const {
     check_cpu();
-    return static_cast<const float*>(storage_->data()) + offset_;
+    return static_cast<const float*>(buffer_->data()) + offset_;
 }
 
 float* Tensor::data() {
     check_cpu();
-    return static_cast<float*>(storage_->data()) + offset_;
+    return static_cast<float*>(buffer_->data()) + offset_;
 }
 
 // ========== 统一元素访问 at() ==========
@@ -270,7 +270,7 @@ float Tensor::at(int64_t i) const {
     if (i < 0 || i >= shape_[0]) {
         throw std::runtime_error("Index out of range");
     }
-    const float* ptr = static_cast<const float*>(storage_->data());
+    const float* ptr = static_cast<const float*>(buffer_->data());
     return ptr[offset_ + i * strides_[0]];
 }
 
@@ -284,14 +284,14 @@ float Tensor::at(int64_t i, int64_t j) const {
     if (i < 0 || i >= shape_[0] || j < 0 || j >= shape_[1]) {
         throw std::runtime_error("Index out of range");
     }
-    const float* ptr = static_cast<const float*>(storage_->data());
+    const float* ptr = static_cast<const float*>(buffer_->data());
     return ptr[offset_ + i * strides_[0] + j * strides_[1]];
 }
 
 float Tensor::at(const std::vector<int64_t>& indices) const {
     check_cpu();
     int64_t offset = compute_offset(indices);
-    const float* ptr = static_cast<const float*>(storage_->data());
+    const float* ptr = static_cast<const float*>(buffer_->data());
     return ptr[offset];
 }
 
@@ -304,7 +304,7 @@ float& Tensor::at(int64_t i) {
     if (i < 0 || i >= shape_[0]) {
         throw std::runtime_error("Index out of range");
     }
-    float* ptr = static_cast<float*>(storage_->data());
+    float* ptr = static_cast<float*>(buffer_->data());
     return ptr[offset_ + i * strides_[0]];
 }
 
@@ -318,7 +318,7 @@ float& Tensor::at(int64_t i, int64_t j) {
     if (i < 0 || i >= shape_[0] || j < 0 || j >= shape_[1]) {
         throw std::runtime_error("Index out of range");
     }
-    float* ptr = static_cast<float*>(storage_->data());
+    float* ptr = static_cast<float*>(buffer_->data());
     return ptr[offset_ + i * strides_[0] + j * strides_[1]];
 }
 

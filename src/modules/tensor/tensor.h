@@ -8,7 +8,7 @@
 #include <functional>
 
 #include "device_type.h"
-#include "tensor_storage.h"
+#include "device_buffer.h"
 #include "stream.h"
 
 // 前向声明 Lua 相关类型
@@ -24,7 +24,7 @@ namespace tensor {
  * Tensor - 多维张量类
  *
  * 特性：
- * - 多设备支持 (CPU, NPU, TPU) 通过 TensorStorage 抽象
+ * - 多设备支持 (CPU, NPU, TPU) 通过 DeviceBuffer 抽象
  * - 零拷贝视图操作 (slice, transpose) 使用 stride-based 索引
  * - 高性能计算 (contiguous 内存优化，SIMD 友好)
  * - Lua 互操作 (通过 LuaIntf 绑定)
@@ -48,10 +48,10 @@ public:
     /// 从原始指针构造（零拷贝或拷贝）
     /// @param owner 如果提供，共享所有权；否则拷贝数据
     Tensor(const float* data, const std::vector<int64_t>& shape,
-           std::shared_ptr<TensorStorage> owner = nullptr);
+           std::shared_ptr<DeviceBuffer> owner = nullptr);
 
     /// 内部构造（支持 strides 和 offset，用于零拷贝视图）
-    Tensor(std::shared_ptr<TensorStorage> storage,
+    Tensor(std::shared_ptr<DeviceBuffer> buffer,
            const std::vector<int64_t>& shape,
            const std::vector<int64_t>& strides,
            int64_t offset,
@@ -89,8 +89,8 @@ public:
     /// 获取设备类型（缓存，避免虚函数调用 - OPT-4）
     DeviceType device() const { return device_cache_; }
 
-    /// 获取底层存储对象
-    std::shared_ptr<TensorStorage> storage() const { return storage_; }
+    /// 获取底层缓冲区对象
+    std::shared_ptr<DeviceBuffer> buffer() const { return buffer_; }
 
 
     // ==================== Lua 互操作 ====================
@@ -355,7 +355,7 @@ public:
 private:
     // ==================== 成员变量 ====================
 
-    std::shared_ptr<TensorStorage> storage_;  ///< 底层存储（抽象多设备）
+    std::shared_ptr<DeviceBuffer> buffer_;    ///< 底层缓冲区（抽象多设备）
     std::vector<int64_t> shape_;              ///< 逻辑形状
     std::vector<int64_t> strides_;            ///< 内存步长（支持非连续）
     int64_t offset_;                          ///< 数据起始偏移

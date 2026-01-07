@@ -1,5 +1,5 @@
 #include "tensor.h"
-#include "cpu_storage.h"
+#include "cpu_memory.h"
 #include <cmath>
 #include <stdexcept>
 
@@ -16,13 +16,13 @@ Tensor Tensor::add(const Tensor& other) const {
     other.check_cpu();
 
     int64_t total = compute_size();
-    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    auto new_storage = CpuMemory::allocate(total * sizeof(float));
     float* dst = static_cast<float*>(new_storage->data());
 
     // 快速路径：两者都是 contiguous
     if (contiguous_ && other.contiguous_) {
-        const float* a = static_cast<const float*>(storage_->data()) + offset_;
-        const float* b = static_cast<const float*>(other.storage_->data()) + other.offset_;
+        const float* a = static_cast<const float*>(buffer_->data()) + offset_;
+        const float* b = static_cast<const float*>(other.buffer_->data()) + other.offset_;
 
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = a[i] + b[i];
@@ -31,8 +31,8 @@ Tensor Tensor::add(const Tensor& other) const {
         // 慢速路径：使用 stride-based 访问
         Tensor a_cont = contiguous();
         Tensor b_cont = other.contiguous();
-        const float* a = static_cast<const float*>(a_cont.storage_->data()) + a_cont.offset_;
-        const float* b = static_cast<const float*>(b_cont.storage_->data()) + b_cont.offset_;
+        const float* a = static_cast<const float*>(a_cont.buffer_->data()) + a_cont.offset_;
+        const float* b = static_cast<const float*>(b_cont.buffer_->data()) + b_cont.offset_;
 
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = a[i] + b[i];
@@ -46,18 +46,18 @@ Tensor Tensor::add(float scalar) const {
     check_cpu();
 
     int64_t total = compute_size();
-    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    auto new_storage = CpuMemory::allocate(total * sizeof(float));
     float* dst = static_cast<float*>(new_storage->data());
 
     // 快速路径：contiguous
     if (contiguous_) {
-        const float* src = static_cast<const float*>(storage_->data()) + offset_;
+        const float* src = static_cast<const float*>(buffer_->data()) + offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = src[i] + scalar;
         }
     } else {
         Tensor a = contiguous();
-        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = src[i] + scalar;
         }
@@ -75,20 +75,20 @@ Tensor Tensor::sub(const Tensor& other) const {
     other.check_cpu();
 
     int64_t total = compute_size();
-    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    auto new_storage = CpuMemory::allocate(total * sizeof(float));
     float* dst = static_cast<float*>(new_storage->data());
 
     if (contiguous_ && other.contiguous_) {
-        const float* a = static_cast<const float*>(storage_->data()) + offset_;
-        const float* b = static_cast<const float*>(other.storage_->data()) + other.offset_;
+        const float* a = static_cast<const float*>(buffer_->data()) + offset_;
+        const float* b = static_cast<const float*>(other.buffer_->data()) + other.offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = a[i] - b[i];
         }
     } else {
         Tensor a_cont = contiguous();
         Tensor b_cont = other.contiguous();
-        const float* a = static_cast<const float*>(a_cont.storage_->data()) + a_cont.offset_;
-        const float* b = static_cast<const float*>(b_cont.storage_->data()) + b_cont.offset_;
+        const float* a = static_cast<const float*>(a_cont.buffer_->data()) + a_cont.offset_;
+        const float* b = static_cast<const float*>(b_cont.buffer_->data()) + b_cont.offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = a[i] - b[i];
         }
@@ -101,17 +101,17 @@ Tensor Tensor::sub(float scalar) const {
     check_cpu();
 
     int64_t total = compute_size();
-    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    auto new_storage = CpuMemory::allocate(total * sizeof(float));
     float* dst = static_cast<float*>(new_storage->data());
 
     if (contiguous_) {
-        const float* src = static_cast<const float*>(storage_->data()) + offset_;
+        const float* src = static_cast<const float*>(buffer_->data()) + offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = src[i] - scalar;
         }
     } else {
         Tensor a = contiguous();
-        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = src[i] - scalar;
         }
@@ -129,20 +129,20 @@ Tensor Tensor::mul(const Tensor& other) const {
     other.check_cpu();
 
     int64_t total = compute_size();
-    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    auto new_storage = CpuMemory::allocate(total * sizeof(float));
     float* dst = static_cast<float*>(new_storage->data());
 
     if (contiguous_ && other.contiguous_) {
-        const float* a = static_cast<const float*>(storage_->data()) + offset_;
-        const float* b = static_cast<const float*>(other.storage_->data()) + other.offset_;
+        const float* a = static_cast<const float*>(buffer_->data()) + offset_;
+        const float* b = static_cast<const float*>(other.buffer_->data()) + other.offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = a[i] * b[i];
         }
     } else {
         Tensor a_cont = contiguous();
         Tensor b_cont = other.contiguous();
-        const float* a = static_cast<const float*>(a_cont.storage_->data()) + a_cont.offset_;
-        const float* b = static_cast<const float*>(b_cont.storage_->data()) + b_cont.offset_;
+        const float* a = static_cast<const float*>(a_cont.buffer_->data()) + a_cont.offset_;
+        const float* b = static_cast<const float*>(b_cont.buffer_->data()) + b_cont.offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = a[i] * b[i];
         }
@@ -155,17 +155,17 @@ Tensor Tensor::mul(float scalar) const {
     check_cpu();
 
     int64_t total = compute_size();
-    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    auto new_storage = CpuMemory::allocate(total * sizeof(float));
     float* dst = static_cast<float*>(new_storage->data());
 
     if (contiguous_) {
-        const float* src = static_cast<const float*>(storage_->data()) + offset_;
+        const float* src = static_cast<const float*>(buffer_->data()) + offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = src[i] * scalar;
         }
     } else {
         Tensor a = contiguous();
-        const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+        const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = src[i] * scalar;
         }
@@ -183,12 +183,12 @@ Tensor Tensor::div(const Tensor& other) const {
     other.check_cpu();
 
     int64_t total = compute_size();
-    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    auto new_storage = CpuMemory::allocate(total * sizeof(float));
     float* dst = static_cast<float*>(new_storage->data());
 
     if (contiguous_ && other.contiguous_) {
-        const float* a = static_cast<const float*>(storage_->data()) + offset_;
-        const float* b = static_cast<const float*>(other.storage_->data()) + other.offset_;
+        const float* a = static_cast<const float*>(buffer_->data()) + offset_;
+        const float* b = static_cast<const float*>(other.buffer_->data()) + other.offset_;
         for (int64_t i = 0; i < total; ++i) {
             if (std::abs(b[i]) < 1e-7f) {
                 throw std::runtime_error("Division by zero");
@@ -198,8 +198,8 @@ Tensor Tensor::div(const Tensor& other) const {
     } else {
         Tensor a_cont = contiguous();
         Tensor b_cont = other.contiguous();
-        const float* a = static_cast<const float*>(a_cont.storage_->data()) + a_cont.offset_;
-        const float* b = static_cast<const float*>(b_cont.storage_->data()) + b_cont.offset_;
+        const float* a = static_cast<const float*>(a_cont.buffer_->data()) + a_cont.offset_;
+        const float* b = static_cast<const float*>(b_cont.buffer_->data()) + b_cont.offset_;
         for (int64_t i = 0; i < total; ++i) {
             if (std::abs(b[i]) < 1e-7f) {
                 throw std::runtime_error("Division by zero");
@@ -219,18 +219,18 @@ Tensor Tensor::div(float scalar) const {
     check_cpu();
 
     int64_t total = compute_size();
-    auto new_storage = CpuStorage::allocate(total * sizeof(float));
+    auto new_storage = CpuMemory::allocate(total * sizeof(float));
     float* dst = static_cast<float*>(new_storage->data());
     float inv_scalar = 1.0f / scalar;
 
     if (contiguous_) {
-        const float* src = static_cast<const float*>(storage_->data()) + offset_;
+        const float* src = static_cast<const float*>(buffer_->data()) + offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = src[i] * inv_scalar;
         }
     } else {
         Tensor a_cont = contiguous();
-        const float* src = static_cast<const float*>(a_cont.storage_->data()) + a_cont.offset_;
+        const float* src = static_cast<const float*>(a_cont.buffer_->data()) + a_cont.offset_;
         for (int64_t i = 0; i < total; ++i) {
             dst[i] = src[i] * inv_scalar;
         }
@@ -247,7 +247,7 @@ Tensor& Tensor::add_(float scalar) {
         throw std::runtime_error("In-place ops require contiguous tensor");
     }
 
-    float* ptr = static_cast<float*>(storage_->data()) + offset_;
+    float* ptr = static_cast<float*>(buffer_->data()) + offset_;
     int64_t total = compute_size();
 
     for (int64_t i = 0; i < total; ++i) {
@@ -263,7 +263,7 @@ Tensor& Tensor::sub_(float scalar) {
         throw std::runtime_error("In-place ops require contiguous tensor");
     }
 
-    float* ptr = static_cast<float*>(storage_->data()) + offset_;
+    float* ptr = static_cast<float*>(buffer_->data()) + offset_;
     int64_t total = compute_size();
 
     for (int64_t i = 0; i < total; ++i) {
@@ -279,7 +279,7 @@ Tensor& Tensor::mul_(float scalar) {
         throw std::runtime_error("In-place ops require contiguous tensor");
     }
 
-    float* ptr = static_cast<float*>(storage_->data()) + offset_;
+    float* ptr = static_cast<float*>(buffer_->data()) + offset_;
     int64_t total = compute_size();
 
     // 循环展开
@@ -307,7 +307,7 @@ Tensor& Tensor::div_(float scalar) {
         throw std::runtime_error("In-place ops require contiguous tensor");
     }
 
-    float* ptr = static_cast<float*>(storage_->data()) + offset_;
+    float* ptr = static_cast<float*>(buffer_->data()) + offset_;
     int64_t total = compute_size();
     float inv_scalar = 1.0f / scalar;
 

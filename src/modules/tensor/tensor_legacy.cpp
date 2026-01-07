@@ -17,7 +17,7 @@ LuaIntf::LuaRef Tensor::filter_yolo(lua_State* L, float conf_thres) {
 
     check_cpu();
     Tensor a = contiguous();
-    const float* data_ptr = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* data_ptr = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     int64_t dim1 = shape_[1];
     int64_t dim2 = shape_[2];
@@ -108,7 +108,7 @@ LuaIntf::LuaRef Tensor::filter_yolo_pose(lua_State* L, float conf_thres) {
 
     check_cpu();
     Tensor a = contiguous();
-    const float* data_ptr = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* data_ptr = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     int64_t dim1 = shape_[1];
     int64_t dim2 = shape_[2];
@@ -188,7 +188,7 @@ LuaIntf::LuaRef Tensor::filter_yolo_seg(lua_State* L, float conf_thres) {
 
     check_cpu();
     Tensor a = contiguous();
-    const float* data_ptr = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* data_ptr = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     int64_t dim1 = shape_[1];
     int64_t dim2 = shape_[2];
@@ -303,7 +303,7 @@ LuaIntf::LuaRef Tensor::process_mask(lua_State* L, const LuaIntf::LuaRef& mask_c
     int mw = static_cast<int>(proto_shape[3]);
     int num_masks = 32;
 
-    const float* proto_data = static_cast<const float*>(proto.storage_->data()) + proto.offset_;
+    const float* proto_data = static_cast<const float*>(proto.buffer_->data()) + proto.offset_;
 
     // 1. Matrix Multiplication: Mask = Coeffs * Proto
     cv::Mat proto_mat(num_masks, mh * mw, CV_32F, const_cast<float*>(proto_data));
@@ -376,7 +376,7 @@ LuaIntf::LuaRef Tensor::argmax(lua_State* L) {
 
     int num_classes = static_cast<int>(shape_[1]);
     int max_idx = 0;
-    const float* ptr = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* ptr = static_cast<const float*>(a.buffer_->data()) + a.offset_;
     float max_val = ptr[0];
 
     for (int i = 1; i < num_classes; ++i) {
@@ -403,7 +403,7 @@ LuaIntf::LuaRef Tensor::topk(lua_State* L, int k) {
     int num_classes = static_cast<int>(shape_[1]);
     if (k > num_classes) k = num_classes;
 
-    const float* ptr = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* ptr = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     std::vector<std::pair<float, int>> scores(num_classes);
     for (int i = 0; i < num_classes; ++i) {

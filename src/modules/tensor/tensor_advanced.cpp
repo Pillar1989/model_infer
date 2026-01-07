@@ -1,5 +1,5 @@
 #include "tensor.h"
-#include "cpu_storage.h"
+#include "cpu_memory.h"
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>

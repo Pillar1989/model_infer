@@ -88,33 +88,39 @@ target_compile_options(lua PRIVATE -x c++ -O3 -Wall -DLUA_USE_POSIX)
 ```
 **Why**: Ensures exception safety when C++ exceptions cross the Lua boundary. Without this, throwing exceptions from C++ through Lua causes undefined behavior.
 
-#### 2. TensorStorage Abstraction Layer
+#### 2. DeviceBuffer Abstraction Layer
 **Location**: `src/modules/tensor/`
 
 The tensor system uses a **virtual interface pattern** to support multiple devices:
 
 ```
-TensorStorage (interface)
-    ├── CpuStorage (CPU implementation)
-    └── [Future: NpuStorage, TpuStorage]
+DeviceBuffer (interface) - 设备缓冲区抽象
+    ├── CpuMemory (CPU implementation) - CPU内存管理
+    └── [Future: NpuMemory, TpuMemory]
 
 Tensor (user-facing class)
-    └── uses shared_ptr<TensorStorage>
+    └── uses shared_ptr<DeviceBuffer>
 ```
 
 **Key files**:
-- `tensor_storage.h`: Abstract interface with virtual methods
-- `cpu_storage.cpp`: CPU-specific implementation
-- `tensor.h/cpp`: User-facing tensor operations with stride-based indexing
+- `device_buffer.h`: Abstract buffer interface with virtual methods
+- `cpu_memory.h/cpp`: CPU memory management implementation
+- `tensor.h`: User-facing tensor operations with stride-based indexing
+- `tensor_*.cpp`: Modular implementation (10 files by functionality)
+
+**Naming rationale**:
+- **DeviceBuffer**: Emphasizes cross-device data buffer abstraction
+- **CpuMemory**: Focuses on CPU-side memory allocation/deallocation
+- Combines precision: buffer (interface), memory (implementation), allocation (operations)
 
 **Design tradeoff**: Virtual function overhead (~few nanoseconds per call) vs. device abstraction. Current performance bottlenecks are NOT the virtual calls but rather:
-- Memory allocation (`CpuStorage::allocate` with memset)
+- Memory allocation (`CpuMemory::allocate` with memset)
 - Non-contiguous tensor copying (`contiguous_copy` recursive implementation)
 
 #### 3. Zero-Copy View Operations
-**Location**: `src/modules/tensor/tensor.cpp`
+**Location**: `src/modules/tensor/tensor_shape.cpp`
 
-Operations like `slice()`, `transpose()`, `squeeze()` are **zero-copy** - they share the same underlying `TensorStorage` but modify metadata:
+Operations like `slice()`, `transpose()`, `squeeze()` are **zero-copy** - they share the same underlying `DeviceBuffer` but modify metadata:
 - `shape_`: Logical dimensions
 - `strides_`: Memory layout (enables non-contiguous views)
 - `offset_`: Starting position in storage
@@ -360,6 +366,10 @@ src/
   │   ├── lua_utils.*       # NMS, box utils
   │   └── tensor/           # Tensor implementation (modular)
   │       ├── tensor.h                  # Tensor class interface
+  │       ├── device_buffer.h/cpp       # DeviceBuffer abstract interface
+  │       ├── cpu_memory.h/cpp          # CpuMemory implementation
+  │       ├── device_type.h             # Device enum (CPU/NPU/TPU)
+  │       ├── stream.h/cpp              # Async stream abstraction
   │       ├── tensor_core.cpp           # Constructors, data access
   │       ├── tensor_device.cpp         # Device ops (to, contiguous, view)
   │       ├── tensor_shape.cpp          # Shape ops (slice, reshape, transpose)
@@ -369,11 +379,7 @@ src/
   │       ├── tensor_reduction.cpp      # Reduction ops (sum, max, argmax)
   │       ├── tensor_select.cpp         # Selection and indexing
   │       ├── tensor_advanced.cpp       # Gather, concat, split
-  │       ├── tensor_legacy.cpp         # Legacy YOLO filter methods
-  │       ├── tensor_storage.*          # Abstract storage interface
-  │       ├── cpu_storage.*             # CPU implementation
-  │       ├── device_type.h             # Enum for CPU/NPU/TPU
-  │       └── stream.*                  # Async operations (future)
+  │       └── tensor_legacy.cpp         # Legacy YOLO filter methods
   └── bindings/
       └── register_modules.cpp      # Lua module registration
 

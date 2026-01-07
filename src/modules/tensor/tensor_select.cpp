@@ -1,5 +1,5 @@
 #include "tensor.h"
-#include "cpu_storage.h"
+#include "cpu_memory.h"
 #include <algorithm>
 #include <stdexcept>
 #include <vector>
@@ -15,7 +15,7 @@ std::vector<int64_t> Tensor::nonzero() const {
     Tensor a = contiguous();
 
     std::vector<int64_t> indices;
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
     int64_t total = compute_size();
 
     indices.reserve(total / 10);
@@ -34,7 +34,7 @@ std::vector<int64_t> Tensor::where_indices(float threshold, const std::string& o
     Tensor a = contiguous();
 
     std::vector<int64_t> indices;
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
     int64_t total = compute_size();
 
     indices.reserve(total / 10);
@@ -95,7 +95,7 @@ Tensor Tensor::index_select(int dim, const std::vector<int64_t>& indices) const 
 
     int64_t new_size = outer_size * indices.size() * inner_size;
     std::vector<float> new_data(new_size);
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     for (int64_t i = 0; i < outer_size; ++i) {
         for (size_t j = 0; j < indices.size(); ++j) {

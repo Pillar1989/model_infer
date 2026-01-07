@@ -1,21 +1,21 @@
-#include "cpu_storage.h"
+#include "cpu_memory.h"
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
 namespace tensor {
 
-std::shared_ptr<CpuStorage> CpuStorage::allocate(size_t size_bytes, size_t alignment, bool zero_init) {
+std::shared_ptr<CpuMemory> CpuMemory::allocate(size_t size_bytes, size_t alignment, bool zero_init) {
     if (size_bytes == 0) {
-        throw std::invalid_argument("CpuStorage::allocate: size_bytes cannot be 0");
+        throw std::invalid_argument("CpuMemory::allocate: size_bytes cannot be 0");
     }
 
     // 对齐要求必须是 2 的幂
     if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
-        throw std::invalid_argument("CpuStorage::allocate: alignment must be power of 2");
+        throw std::invalid_argument("CpuMemory::allocate: alignment must be power of 2");
     }
 
-    auto storage = std::shared_ptr<CpuStorage>(new CpuStorage());
+    auto storage = std::shared_ptr<CpuMemory>(new CpuMemory());
 
     // 使用 aligned_alloc 分配对齐内存
     // size_bytes 必须是 alignment 的倍数
@@ -43,15 +43,15 @@ std::shared_ptr<CpuStorage> CpuStorage::allocate(size_t size_bytes, size_t align
     return storage;
 }
 
-std::shared_ptr<CpuStorage> CpuStorage::from_external(void* ptr, size_t size_bytes, bool take_ownership) {
+std::shared_ptr<CpuMemory> CpuMemory::from_external(void* ptr, size_t size_bytes, bool take_ownership) {
     if (!ptr) {
-        throw std::invalid_argument("CpuStorage::from_external: ptr cannot be null");
+        throw std::invalid_argument("CpuMemory::from_external: ptr cannot be null");
     }
     if (size_bytes == 0) {
-        throw std::invalid_argument("CpuStorage::from_external: size_bytes cannot be 0");
+        throw std::invalid_argument("CpuMemory::from_external: size_bytes cannot be 0");
     }
 
-    auto storage = std::shared_ptr<CpuStorage>(new CpuStorage());
+    auto storage = std::shared_ptr<CpuMemory>(new CpuMemory());
     storage->data_ = ptr;
     storage->size_bytes_ = size_bytes;
     storage->alignment_ = 1;  // 外部内存对齐未知
@@ -60,7 +60,7 @@ std::shared_ptr<CpuStorage> CpuStorage::from_external(void* ptr, size_t size_byt
     return storage;
 }
 
-CpuStorage::~CpuStorage() {
+CpuMemory::~CpuMemory() {
     if (owns_memory_ && data_) {
 #if defined(_WIN32)
         _aligned_free(data_);
@@ -71,7 +71,7 @@ CpuStorage::~CpuStorage() {
     }
 }
 
-CpuStorage::CpuStorage(CpuStorage&& other) noexcept
+CpuMemory::CpuMemory(CpuMemory&& other) noexcept
     : data_(other.data_),
       size_bytes_(other.size_bytes_),
       alignment_(other.alignment_),
@@ -81,7 +81,7 @@ CpuStorage::CpuStorage(CpuStorage&& other) noexcept
     other.owns_memory_ = false;
 }
 
-CpuStorage& CpuStorage::operator=(CpuStorage&& other) noexcept {
+CpuMemory& CpuMemory::operator=(CpuMemory&& other) noexcept {
     if (this != &other) {
         // 释放当前资源
         if (owns_memory_ && data_) {
@@ -106,12 +106,12 @@ CpuStorage& CpuStorage::operator=(CpuStorage&& other) noexcept {
     return *this;
 }
 
-void CpuStorage::copy_to(TensorStorage* dst) const {
+void CpuMemory::copy_to(DeviceBuffer* dst) const {
     if (!dst) {
-        throw std::invalid_argument("CpuStorage::copy_to: dst cannot be null");
+        throw std::invalid_argument("CpuMemory::copy_to: dst cannot be null");
     }
     if (dst->size_bytes() < size_bytes_) {
-        throw std::invalid_argument("CpuStorage::copy_to: dst too small");
+        throw std::invalid_argument("CpuMemory::copy_to: dst too small");
     }
 
     if (dst->device() == DeviceType::CPU) {
@@ -119,16 +119,16 @@ void CpuStorage::copy_to(TensorStorage* dst) const {
         std::memcpy(dst->data(), data_, size_bytes_);
     } else {
         // CPU -> NPU/TPU: 需要子类实现
-        throw std::runtime_error("CpuStorage::copy_to: cross-device copy not implemented for target device");
+        throw std::runtime_error("CpuMemory::copy_to: cross-device copy not implemented for target device");
     }
 }
 
-void CpuStorage::copy_from(const TensorStorage* src) {
+void CpuMemory::copy_from(const DeviceBuffer* src) {
     if (!src) {
-        throw std::invalid_argument("CpuStorage::copy_from: src cannot be null");
+        throw std::invalid_argument("CpuMemory::copy_from: src cannot be null");
     }
     if (size_bytes_ < src->size_bytes()) {
-        throw std::invalid_argument("CpuStorage::copy_from: this storage too small");
+        throw std::invalid_argument("CpuMemory::copy_from: this buffer too small");
     }
 
     if (src->device() == DeviceType::CPU) {
@@ -136,30 +136,30 @@ void CpuStorage::copy_from(const TensorStorage* src) {
         std::memcpy(data_, src->data(), src->size_bytes());
     } else {
         // NPU/TPU -> CPU: 需要子类实现
-        throw std::runtime_error("CpuStorage::copy_from: cross-device copy not implemented for source device");
+        throw std::runtime_error("CpuMemory::copy_from: cross-device copy not implemented for source device");
     }
 }
 
 // ========== 异步接口实现（CPU 同步降级） ==========
 
-void CpuStorage::copy_to_async(TensorStorage* dst, Stream* stream) const {
+void CpuMemory::copy_to_async(DeviceBuffer* dst, Stream* stream) const {
     // CPU 实现：直接同步执行，忽略 stream
     (void)stream;  // 忽略未使用参数
     copy_to(dst);
 }
 
-void CpuStorage::copy_from_async(const TensorStorage* src, Stream* stream) {
+void CpuMemory::copy_from_async(const DeviceBuffer* src, Stream* stream) {
     // CPU 实现：直接同步执行，忽略 stream
     (void)stream;  // 忽略未使用参数
     copy_from(src);
 }
 
-void CpuStorage::sync(Stream* stream) const {
+void CpuMemory::sync(Stream* stream) const {
     // CPU 操作同步执行，无需等待
     (void)stream;  // 忽略未使用参数
 }
 
-bool CpuStorage::supports_async() const {
+bool CpuMemory::supports_async() const {
     // CPU 不支持真正的异步操作
     return false;
 }

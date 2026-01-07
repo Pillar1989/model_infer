@@ -41,7 +41,7 @@ Tensor Tensor::slice(int dim, int64_t start, int64_t end, int64_t step) const {
         }
     }
 
-    return Tensor(storage_, new_shape, new_strides, new_offset, new_contiguous);
+    return Tensor(buffer_, new_shape, new_strides, new_offset, new_contiguous);
 }
 
 Tensor Tensor::select_dim(int dim, int64_t index) const {
@@ -66,7 +66,7 @@ Tensor Tensor::select_dim(int dim, int64_t index) const {
 
     int64_t new_offset = offset_ + index * strides_[dim];
 
-    return Tensor(storage_, new_shape, new_strides, new_offset, false);
+    return Tensor(buffer_, new_shape, new_strides, new_offset, false);
 }
 
 Tensor Tensor::get_column(int64_t col_idx) const {
@@ -115,7 +115,7 @@ Tensor Tensor::reshape(const std::vector<int64_t>& new_shape) const {
         return contiguous_copy().reshape(final_shape);
     }
 
-    return Tensor(storage_, final_shape, compute_strides(final_shape), offset_, true);
+    return Tensor(buffer_, final_shape, compute_strides(final_shape), offset_, true);
 }
 
 Tensor Tensor::transpose(const std::vector<int>& dims) const {
@@ -143,7 +143,7 @@ Tensor Tensor::transpose(const std::vector<int>& dims) const {
         new_strides[i] = strides_[dim];
     }
 
-    return Tensor(storage_, new_shape, new_strides, offset_, false);
+    return Tensor(buffer_, new_shape, new_strides, offset_, false);
 }
 
 Tensor Tensor::transpose() const {
@@ -187,7 +187,7 @@ Tensor Tensor::squeeze(int dim) const {
         new_strides.push_back(1);
     }
 
-    return Tensor(storage_, new_shape, new_strides, offset_, contiguous_);
+    return Tensor(buffer_, new_shape, new_strides, offset_, contiguous_);
 }
 
 Tensor Tensor::unsqueeze(int dim) const {
@@ -204,7 +204,7 @@ Tensor Tensor::unsqueeze(int dim) const {
     int64_t new_stride = (dim < ndim) ? strides_[dim] : 1;
     new_strides.insert(new_strides.begin() + dim, new_stride);
 
-    return Tensor(storage_, new_shape, new_strides, offset_, contiguous_);
+    return Tensor(buffer_, new_shape, new_strides, offset_, contiguous_);
 }
 
 } // namespace tensor

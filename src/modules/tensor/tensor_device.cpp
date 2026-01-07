@@ -1,5 +1,5 @@
 #include "tensor.h"
-#include "cpu_storage.h"
+#include "cpu_memory.h"
 #include <cstring>
 #include <stdexcept>
 
@@ -10,7 +10,7 @@ namespace tensor {
 // ========== 设备操作 ==========
 
 Tensor Tensor::to(DeviceType device) const {
-    if (storage_->device() == device) {
+    if (buffer_->device() == device) {
         return *this;
     }
 
@@ -18,10 +18,10 @@ Tensor Tensor::to(DeviceType device) const {
     Tensor cont = contiguous();
 
     // 分配目标设备存储
-    auto new_storage = TensorStorage::allocate(cont.storage_->size_bytes(), device);
+    auto new_storage = DeviceBuffer::allocate(cont.buffer_->size_bytes(), device);
 
     // 复制数据
-    cont.storage_->copy_to(new_storage.get());
+    cont.buffer_->copy_to(new_storage.get());
 
     return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
@@ -36,7 +36,7 @@ Tensor Tensor::contiguous() const {
 // ========== 异步设备操作 ==========
 
 Tensor Tensor::to_async(DeviceType device, Stream* stream) const {
-    if (storage_->device() == device) {
+    if (buffer_->device() == device) {
         return *this;
     }
 
@@ -44,16 +44,16 @@ Tensor Tensor::to_async(DeviceType device, Stream* stream) const {
     Tensor cont = contiguous();
 
     // 分配目标设备存储
-    auto new_storage = TensorStorage::allocate(cont.storage_->size_bytes(), device);
+    auto new_storage = DeviceBuffer::allocate(cont.buffer_->size_bytes(), device);
 
     // 异步复制数据
-    cont.storage_->copy_to_async(new_storage.get(), stream);
+    cont.buffer_->copy_to_async(new_storage.get(), stream);
 
     return Tensor(new_storage, shape_, compute_strides(shape_), 0, true);
 }
 
 void Tensor::sync(Stream* stream) const {
-    storage_->sync(stream);
+    buffer_->sync(stream);
 }
 
 bool Tensor::is_ready(Stream* stream) const {
@@ -72,9 +72,9 @@ Tensor Tensor::contiguous_copy() const {
     check_cpu();
 
     int64_t total_size = compute_size();
-    auto new_storage = CpuStorage::allocate(total_size * sizeof(float));
+    auto new_storage = CpuMemory::allocate(total_size * sizeof(float));
     float* dst = static_cast<float*>(new_storage->data());
-    const float* src = static_cast<const float*>(storage_->data()) + offset_;
+    const float* src = static_cast<const float*>(buffer_->data()) + offset_;
     int ndim = static_cast<int>(shape_.size());
 
     // ========== 1D 特化 ==========
@@ -221,15 +221,15 @@ LuaIntf::TensorView<float> Tensor::view() {
     if (!contiguous_) {
         Tensor cont = contiguous_copy();
         return LuaIntf::TensorView<float>(
-            static_cast<float*>(cont.storage_->data()),
+            static_cast<float*>(cont.buffer_->data()),
             cont.compute_size(),
-            cont.storage_
+            cont.buffer_
         );
     }
     return LuaIntf::TensorView<float>(
-        static_cast<float*>(storage_->data()) + offset_,
+        static_cast<float*>(buffer_->data()) + offset_,
         compute_size(),
-        storage_
+        buffer_
     );
 }
 

@@ -12,7 +12,7 @@ Tensor Tensor::sigmoid() const {
     Tensor a = contiguous();
 
     std::vector<float> result_data(compute_size());
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     for (int64_t i = 0; i < compute_size(); ++i) {
         result_data[i] = 1.0f / (1.0f + std::exp(-src[i]));
@@ -31,7 +31,7 @@ Tensor Tensor::softmax(int axis) const {
 
     Tensor a = contiguous();
     std::vector<float> result_data(compute_size());
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     if (ax != static_cast<int>(shape_.size()) - 1) {
         throw std::runtime_error("Softmax only supports last axis for now");
@@ -72,7 +72,7 @@ Tensor Tensor::exp_() const {
     Tensor a = contiguous();
 
     std::vector<float> result_data(compute_size());
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     for (int64_t i = 0; i < compute_size(); ++i) {
         result_data[i] = std::exp(src[i]);
@@ -86,7 +86,7 @@ Tensor Tensor::log_() const {
     Tensor a = contiguous();
 
     std::vector<float> result_data(compute_size());
-    const float* src = static_cast<const float*>(a.storage_->data()) + a.offset_;
+    const float* src = static_cast<const float*>(a.buffer_->data()) + a.offset_;
 
     for (int64_t i = 0; i < compute_size(); ++i) {
         result_data[i] = std::log(src[i]);
