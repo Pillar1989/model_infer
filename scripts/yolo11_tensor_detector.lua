@@ -79,9 +79,10 @@ function Model.postprocess(outputs, meta)
     local boxes = output:slice(1, 0, 4, 1):squeeze(0):contiguous()  -- [4, 8400]
     local scores = output:slice(1, 4, 84, 1):squeeze(0):contiguous()  -- [80, 8400]
 
-    -- 2. 对每个box找到最大分数和对应类别
-    local max_scores = scores:max(0, false)  -- [8400]
-    local class_ids = scores:argmax(0)  -- Lua table [8400]
+    -- 2. 对每个box找到最大分数和对应类别 (融合操作，单次遍历)
+    local result = scores:max_with_argmax(0)  -- {values=Tensor[8400], indices=table[8400]}
+    local max_scores = result.values
+    local class_ids = result.indices
 
     -- 3. 向量化过滤：找出满足条件的索引（关键优化！）
     local valid_indices = max_scores:where_indices(Model.config.conf_thres, "ge")
@@ -91,9 +92,8 @@ function Model.postprocess(outputs, meta)
     end
 
     -- 4. 批量提取有效数据（避免大规模to_table转换）
-    -- extract_columns返回[4, N] tensor，转置后to_table得到[[cx,cy,w,h], ...]
-    local filtered_boxes_tensor = boxes:extract_columns(valid_indices)  -- [4, N] tensor
-    local filtered_boxes = filtered_boxes_tensor:transpose():to_table()  -- 转置后变成[N, 4]，再转table
+    -- extract_columns 直接返回行格式 {{cx,cy,w,h}, ...}
+    local filtered_boxes = boxes:extract_columns(valid_indices)
 
     -- 对于1D tensor [8400]，使用index_select提取指定元素，然后转为table
     local filtered_scores_tensor = max_scores:index_select(0, valid_indices)  -- [num_valid]
