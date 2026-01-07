@@ -92,6 +92,14 @@ function Model.postprocess(outputs, meta)
     -- Return format: { {x,y,w,h,score,class_id}, ... } in original model coordinates
     local raw_boxes = output_tensor:filter_yolo(Model.config.conf_thres)
 
+    -- Debug: Print first few box scores
+    print(string.format("Debug: filter_yolo returned %d boxes", #raw_boxes))
+    if #raw_boxes > 0 then
+        for i = 1, math.min(3, #raw_boxes) do
+            print(string.format("  Box %d: score=%.4f, cls=%d", i, raw_boxes[i].score, raw_boxes[i].cls))
+        end
+    end
+
     local proposals = {}
 
     -- STEP 2: Coordinate restoration (only process the small number of filtered boxes)
