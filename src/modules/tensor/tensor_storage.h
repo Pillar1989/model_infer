@@ -1,0 +1,132 @@
+#pragma once
+
+#include <cstddef>
+#include <memory>
+#include "device_type.h"
+
+namespace tensor {
+
+// 前向声明
+class Stream;
+
+/**
+ * TensorStorage - 内存抽象基类
+ *
+ * 提供设备无关的内存管理接口，支持：
+ * - 多设备内存管理 (CPU, NPU, TPU)
+ * - 内存对齐要求
+ * - 零拷贝引用外部内存
+ * - 设备间数据传输
+ */
+class TensorStorage {
+public:
+    virtual ~TensorStorage() = default;
+
+    // ========== 数据访问 ==========
+
+    /**
+     * 获取数据指针
+     * 对于设备内存，返回设备端指针
+     */
+    virtual void* data() = 0;
+    virtual const void* data() const = 0;
+
+    /**
+     * 获取数据大小（字节）
+     */
+    virtual size_t size_bytes() const = 0;
+
+    // ========== 设备信息 ==========
+
+    /**
+     * 获取设备类型
+     */
+    virtual DeviceType device() const = 0;
+
+    /**
+     * 获取内存对齐要求
+     */
+    virtual size_t alignment() const = 0;
+
+    // ========== 内存所有权 ==========
+
+    /**
+     * 是否拥有内存所有权
+     * false 表示引用外部内存，不负责释放
+     */
+    virtual bool owns_memory() const = 0;
+
+    // ========== 数据传输 ==========
+
+    /**
+     * 复制数据到目标存储
+     * @param dst 目标存储（可以是不同设备）
+     */
+    virtual void copy_to(TensorStorage* dst) const = 0;
+
+    /**
+     * 从源存储复制数据
+     * @param src 源存储（可以是不同设备）
+     */
+    virtual void copy_from(const TensorStorage* src) = 0;
+
+    // ========== 异步数据传输 ==========
+
+    /**
+     * 异步复制数据到目标存储
+     * @param dst 目标存储（可以是不同设备）
+     * @param stream 异步流（nullptr 表示使用默认流）
+     *
+     * 注意：调用者需要在访问 dst 数据前调用 stream->synchronize()
+     */
+    virtual void copy_to_async(TensorStorage* dst, Stream* stream = nullptr) const = 0;
+
+    /**
+     * 异步从源存储复制数据
+     * @param src 源存储（可以是不同设备）
+     * @param stream 异步流（nullptr 表示使用默认流）
+     */
+    virtual void copy_from_async(const TensorStorage* src, Stream* stream = nullptr) = 0;
+
+    /**
+     * 同步等待所有挂起的异步操作完成
+     * @param stream 要同步的流（nullptr 表示默认流）
+     */
+    virtual void sync(Stream* stream = nullptr) const = 0;
+
+    /**
+     * 检查是否支持异步操作
+     * @return CPU 返回 false，NPU/TPU 返回 true
+     */
+    virtual bool supports_async() const = 0;
+
+    // ========== 工厂方法 ==========
+
+    /**
+     * 分配指定大小的存储
+     * @param size_bytes 字节数
+     * @param device 设备类型（默认 CPU）
+     * @param alignment 对齐要求（默认 64 字节）
+     */
+    static std::shared_ptr<TensorStorage> allocate(
+        size_t size_bytes,
+        DeviceType device = DeviceType::CPU,
+        size_t alignment = 64
+    );
+
+    /**
+     * 引用外部内存（零拷贝）
+     * @param ptr 外部内存指针
+     * @param size_bytes 字节数
+     * @param device 设备类型
+     * @param take_ownership 是否接管所有权
+     */
+    static std::shared_ptr<TensorStorage> from_external(
+        void* ptr,
+        size_t size_bytes,
+        DeviceType device = DeviceType::CPU,
+        bool take_ownership = false
+    );
+};
+
+} // namespace tensor
