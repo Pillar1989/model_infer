@@ -75,8 +75,9 @@ function Model.postprocess(outputs, meta)
     local num_classes = 80
 
     -- 1. 提取box坐标和类别分数
-    local boxes = output:slice(1, 0, 4, 1):squeeze(0)  -- [4, 8400]
-    local scores = output:slice(1, 4, 84, 1):squeeze(0)  -- [80, 8400]
+    -- 关键优化：立即调用contiguous()确保后续操作高效
+    local boxes = output:slice(1, 0, 4, 1):squeeze(0):contiguous()  -- [4, 8400]
+    local scores = output:slice(1, 4, 84, 1):squeeze(0):contiguous()  -- [80, 8400]
 
     -- 2. 对每个box找到最大分数和对应类别
     local max_scores = scores:max(0, false)  -- [8400]
@@ -85,15 +86,14 @@ function Model.postprocess(outputs, meta)
     -- 3. 向量化过滤：找出满足条件的索引（关键优化！）
     local valid_indices = max_scores:where_indices(Model.config.conf_thres, "ge")
 
-    print(string.format("过滤后候选框: %d", #valid_indices))
-
     if #valid_indices == 0 then
         return {}
     end
 
     -- 4. 批量提取有效数据（避免大规模to_table转换）
-    -- 对于2D tensor [4, 8400]，提取指定列
-    local filtered_boxes = boxes:extract_columns(valid_indices)  -- {{cx,cy,w,h}, ...}
+    -- extract_columns返回[4, N] tensor，转置后to_table得到[[cx,cy,w,h], ...]
+    local filtered_boxes_tensor = boxes:extract_columns(valid_indices)  -- [4, N] tensor
+    local filtered_boxes = filtered_boxes_tensor:transpose():to_table()  -- 转置后变成[N, 4]，再转table
 
     -- 对于1D tensor [8400]，使用index_select提取指定元素，然后转为table
     local filtered_scores_tensor = max_scores:index_select(0, valid_indices)  -- [num_valid]
@@ -127,16 +127,16 @@ function Model.postprocess(outputs, meta)
             label = Model.config.labels[cls_id + 1] or "unknown"
         })
     end
-    
-    -- 4. 坐标还原到原图
+
+    -- 6. 坐标还原到原图
     for _, box in ipairs(proposals) do
         box.x = (box.x - meta.pad_x) / meta.scale
         box.y = (box.y - meta.pad_y) / meta.scale
         box.w = box.w / meta.scale
         box.h = box.h / meta.scale
     end
-    
-    -- 5. NMS
+
+    -- 7. NMS
     local final_boxes = utils.nms(proposals, Model.config.iou_thres)
     
     print(string.format("NMS后最终框: %d", #final_boxes))
