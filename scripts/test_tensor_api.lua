@@ -360,6 +360,39 @@ test("Metamethod __div", function()
 end)
 
 -- ========================================
+-- Level 3.5: In-place 操作 (OPT-5)
+-- ========================================
+print("\n========== Level 3.5: In-place 操作 ==========\n")
+
+test("add_ in-place", function()
+    local t = nn.Tensor.new({1, 2, 3}, {3})
+    t:add_(10)  -- 修改原 tensor
+    assert_eq(t:get(0), 11, "add_ result[0]")
+    assert_eq(t:get(2), 13, "add_ result[2]")
+end)
+
+test("sub_ in-place", function()
+    local t = nn.Tensor.new({10, 20, 30}, {3})
+    t:sub_(5)
+    assert_eq(t:get(0), 5, "sub_ result[0]")
+    assert_eq(t:get(2), 25, "sub_ result[2]")
+end)
+
+test("mul_ in-place", function()
+    local t = nn.Tensor.new({2, 3, 4}, {3})
+    t:mul_(10)
+    assert_eq(t:get(0), 20, "mul_ result[0]")
+    assert_eq(t:get(2), 40, "mul_ result[2]")
+end)
+
+test("div_ in-place", function()
+    local t = nn.Tensor.new({10, 20, 30}, {3})
+    t:div_(10)
+    assert_eq(t:get(0), 1, "div_ result[0]")
+    assert_eq(t:get(2), 3, "div_ result[2]")
+end)
+
+-- ========================================
 -- Level 4: 数学运算 - Tensor
 -- ========================================
 print("\n========== Level 4: 数学运算 - Tensor ==========\n")
@@ -442,6 +475,52 @@ test("argmin", function()
     local t = nn.Tensor.new({3, 1, 4, 1, 5, 9, 2, 6}, {8})
     local min_idx = t:argmin(-1)
     assert_eq(min_idx, 1, "argmin index")  -- 1 at index 1
+end)
+
+test("max_with_argmax - axis 0", function()
+    -- [3, 4] tensor:
+    -- [[1, 4, 7, 10],
+    --  [2, 5, 8, 11],
+    --  [3, 6, 9, 12]]
+    local t = nn.Tensor.new({1,4,7,10, 2,5,8,11, 3,6,9,12}, {3, 4})
+    local result = t:max_with_argmax(0)
+
+    -- max along axis 0: [3, 6, 9, 12]
+    local values = result.values
+    local indices = result.indices
+
+    assert_eq(values:size(), 4, "values size")
+    assert_eq(#indices, 4, "indices size")
+
+    assert_near(values:get(0), 3, 1e-5, "max[0]")
+    assert_near(values:get(1), 6, 1e-5, "max[1]")
+    assert_near(values:get(2), 9, 1e-5, "max[2]")
+    assert_near(values:get(3), 12, 1e-5, "max[3]")
+
+    assert_eq(indices[1], 2, "argmax[0]")  -- row 2 has max in col 0
+    assert_eq(indices[2], 2, "argmax[1]")  -- row 2 has max in col 1
+    assert_eq(indices[3], 2, "argmax[2]")  -- row 2 has max in col 2
+    assert_eq(indices[4], 2, "argmax[3]")  -- row 2 has max in col 3
+end)
+
+test("max_with_argmax - axis 1", function()
+    -- [3, 4] tensor, max along axis 1
+    local t = nn.Tensor.new({1,4,7,10, 2,5,8,11, 3,6,9,12}, {3, 4})
+    local result = t:max_with_argmax(1)
+
+    local values = result.values
+    local indices = result.indices
+
+    assert_eq(values:size(), 3, "values size")
+    assert_eq(#indices, 3, "indices size")
+
+    assert_near(values:get(0), 10, 1e-5, "max[0]")  -- max of row 0
+    assert_near(values:get(1), 11, 1e-5, "max[1]")  -- max of row 1
+    assert_near(values:get(2), 12, 1e-5, "max[2]")  -- max of row 2
+
+    assert_eq(indices[1], 3, "argmax[0]")  -- col 3 has max in row 0
+    assert_eq(indices[2], 3, "argmax[1]")  -- col 3 has max in row 1
+    assert_eq(indices[3], 3, "argmax[2]")  -- col 3 has max in row 2
 end)
 
 -- ========================================
@@ -578,12 +657,20 @@ test("index_select", function()
 end)
 
 test("extract_columns", function()
+    -- t[3,4]: [[1,2,3,4], [5,6,7,8], [9,10,11,12]]
     local t = nn.Tensor.new({1,2,3,4,5,6,7,8,9,10,11,12}, {3, 4})
     local cols = {0, 2}
+    -- extract_columns 直接返回 Lua table (行格式)
+    -- 结果: {{1,5,9}, {3,7,11}} - 每个内层是一列的所有行值
     local extracted = t:extract_columns(cols)
-    local shape = extracted:shape()
-    assert_eq(shape[1], 3, "extracted rows")
-    assert_eq(shape[2], 2, "extracted cols")
+    assert_eq(#extracted, 2, "extracted columns count")
+    assert_eq(#extracted[1], 3, "column 0 rows")
+    assert_eq(extracted[1][1], 1, "col0 row0")
+    assert_eq(extracted[1][2], 5, "col0 row1")
+    assert_eq(extracted[1][3], 9, "col0 row2")
+    assert_eq(extracted[2][1], 3, "col2 row0")
+    assert_eq(extracted[2][2], 7, "col2 row1")
+    assert_eq(extracted[2][3], 11, "col2 row2")
 end)
 
 -- ========================================
