@@ -84,9 +84,10 @@ function Model.postprocess(outputs, meta)
     -- 提取类别分数 [25200, 80]
     local class_scores = data:slice_columns(5, 85)
 
-    -- 1. 对每个box找最大类别分数和类别ID
-    local max_class_scores = class_scores:max(1, false)  -- [25200]
-    local class_ids = class_scores:argmax(1)  -- Lua table [25200]
+    -- 1. 对每个box找最大类别分数和类别ID (融合操作，单次遍历)
+    local result = class_scores:max_with_argmax(1)  -- {values=Tensor[25200], indices=table[25200]}
+    local max_class_scores = result.values
+    local class_ids = result.indices
 
     local proposals = {}
     local num_boxes = 25200
