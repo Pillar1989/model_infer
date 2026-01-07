@@ -46,6 +46,11 @@ struct InferenceContext {
     LuaIntf::LuaRef postprocess;
 
     ~InferenceContext() {
+        // 重要：先清空 LuaRef 对象，再关闭 Lua 状态
+        // 否则 LuaRef 析构时会访问已关闭的 Lua 状态
+        preprocess = LuaIntf::LuaRef();
+        postprocess = LuaIntf::LuaRef();
+
         if (L) {
             lua_close(L);
             L = nullptr;
