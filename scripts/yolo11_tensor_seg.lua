@@ -78,9 +78,10 @@ function Model.postprocess(outputs, meta)
     local num_classes = 80
 
     -- 1. 分离boxes, scores, mask_coeffs
-    local boxes = output0:slice(1, 0, 4, 1):squeeze(0)  -- [4, 8400]
-    local scores = output0:slice(1, 4, 4 + num_classes, 1):squeeze(0)  -- [80, 8400]
-    local mask_coeffs = output0:slice(1, 4 + num_classes, 116, 1):squeeze(0)  -- [32, 8400]
+    -- 关键优化：立即调用contiguous()确保后续操作高效
+    local boxes = output0:slice(1, 0, 4, 1):squeeze(0):contiguous()  -- [4, 8400]
+    local scores = output0:slice(1, 4, 4 + num_classes, 1):squeeze(0):contiguous()  -- [80, 8400]
+    local mask_coeffs = output0:slice(1, 4 + num_classes, 116, 1):squeeze(0):contiguous()  -- [32, 8400]
 
     -- 2. 找到最大分数和类别
     local max_scores = scores:max(0, false)  -- [8400]
@@ -95,36 +96,36 @@ function Model.postprocess(outputs, meta)
         return {}
     end
 
-    -- 4. 批量提取有效数据
-    local filtered_boxes = boxes:extract_columns(valid_indices)  -- {{cx,cy,w,h}, ...}
-    local filtered_scores_tensor = max_scores:index_select(0, valid_indices)
-    local filtered_scores = filtered_scores_tensor:to_table()
-    local filtered_mask_coeffs = mask_coeffs:extract_columns(valid_indices)  -- {{coeff1, ...coeff32}, ...}
-
+    -- 4. 直接遍历有效索引，使用 at() 高效访问元素（避免 to_table 转换）
     local proposals = {}
 
-    -- 5. 只遍历过滤后的小数据集
     for i = 1, #valid_indices do
-        local idx = valid_indices[i]
-        local box_data = filtered_boxes[i]
-        local coeffs = filtered_mask_coeffs[i]  -- 直接获取32个系数
+        local col = valid_indices[i]  -- 0-based column index
 
-        local cx = box_data[1]
-        local cy = box_data[2]
-        local w = box_data[3]
-        local h = box_data[4]
-        local cls_id = class_ids[idx + 1]  -- Lua索引从1开始
+        -- 直接从原始 boxes tensor 提取坐标 [4, 8400]
+        local cx = boxes:at(0, col)
+        local cy = boxes:at(1, col)
+        local w = boxes:at(2, col)
+        local h = boxes:at(3, col)
+        local cls_id = class_ids[col + 1]  -- Lua table 索引从1开始
+        local conf = max_scores:get(col)
 
         -- 将中心点坐标转换为左上角坐标
         local x = cx - w / 2.0
         local y = cy - h / 2.0
+
+        -- 提取32个mask系数 (process_mask需要table)
+        local coeffs = {}
+        for j = 0, num_mask_coeffs - 1 do
+            coeffs[j + 1] = mask_coeffs:at(j, col)
+        end
 
         table.insert(proposals, {
             x = x,
             y = y,
             w = w,
             h = h,
-            score = filtered_scores[i],
+            score = conf,
             class_id = cls_id,
             label = Model.config.labels[cls_id + 1] or "unknown",
             mask_coeffs = coeffs
