@@ -215,12 +215,19 @@ void register_module(lua_State* L) {
                 .addFunction("div", static_cast<tensor::Tensor(tensor::Tensor::*)(float) const>(&tensor::Tensor::div))
                 .addFunction("div_tensor", static_cast<tensor::Tensor(tensor::Tensor::*)(const tensor::Tensor&) const>(&tensor::Tensor::div))
 
+                // In-place 操作（避免内存分配）
+                .addFunction("add_", &tensor::Tensor::add_)
+                .addFunction("sub_", &tensor::Tensor::sub_)
+                .addFunction("mul_", &tensor::Tensor::mul_)
+                .addFunction("div_", &tensor::Tensor::div_)
+
                 .addFunction("sum", &tensor::Tensor::sum)
                 .addFunction("mean", &tensor::Tensor::mean)
                 .addFunction("max", &tensor::Tensor::max)
                 .addFunction("min", &tensor::Tensor::min)
                 .addFunction("argmax", &tensor::Tensor::argmax_lua)
                 .addFunction("argmin", &tensor::Tensor::argmin_lua)
+                .addFunction("max_with_argmax", &tensor::Tensor::max_with_argmax)
 
                 .addFunction("sigmoid", &tensor::Tensor::sigmoid)
                 .addFunction("softmax", &tensor::Tensor::softmax)
@@ -245,7 +252,7 @@ void register_module(lua_State* L) {
                 .addFunction("nonzero", &tensor::Tensor::nonzero)
                 .addFunction("where_indices", &tensor::Tensor::where_indices)
                 .addFunction("index_select", &tensor::Tensor::index_select)
-                .addFunction("extract_columns", &tensor::Tensor::extract_columns_tensor)
+                .addFunction("extract_columns", &tensor::Tensor::extract_columns_lua)
 
                 // Gather/Concat/Split
                 .addFunction("gather", &tensor::Tensor::gather)
@@ -260,15 +267,15 @@ void register_module(lua_State* L) {
                 .addFunction("argmax_old", &tensor::Tensor::argmax)
                 .addFunction("topk", &tensor::Tensor::topk)
 
-                // Metamethods
+                // Metamethods (使用 const& 避免不必要的 shared_ptr 原子操作)
                 .addMetaFunction("__len", [](const tensor::Tensor* t) { return t->size(); })
                 .addMetaFunction("__tostring", [](const tensor::Tensor* t) {
                     return t->to_string(10);
                 })
-                .addMetaFunction("__add", [](tensor::Tensor& t, float scalar) { return t.add(scalar); })
-                .addMetaFunction("__sub", [](tensor::Tensor& t, float scalar) { return t.sub(scalar); })
-                .addMetaFunction("__mul", [](tensor::Tensor& t, float scalar) { return t.mul(scalar); })
-                .addMetaFunction("__div", [](tensor::Tensor& t, float scalar) { return t.div(scalar); })
+                .addMetaFunction("__add", [](const tensor::Tensor& t, float scalar) { return t.add(scalar); })
+                .addMetaFunction("__sub", [](const tensor::Tensor& t, float scalar) { return t.sub(scalar); })
+                .addMetaFunction("__mul", [](const tensor::Tensor& t, float scalar) { return t.mul(scalar); })
+                .addMetaFunction("__div", [](const tensor::Tensor& t, float scalar) { return t.div(scalar); })
             .endClass()
 
             // TensorView绑定
