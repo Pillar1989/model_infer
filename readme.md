@@ -107,18 +107,27 @@ A hardcoded C++ implementation is provided for performance comparison.
 
 ## 📊 Benchmark Results
 
-Comparison between different implementations on YOLO11n detection task.
+Comparison between different implementations on YOLO11n detection task (640x640).
 
 | Implementation | Time (ms) | vs C++ | Memory | Notes |
 |:--------------|----------:|:------:|:------:|:------|
-| **C++ (`cpp_infer`)** | 180 | - | ~145 MB | Baseline reference |
-| **Lua + Vectorized Tensor API** | 190 | +5.6% | ~150 MB | **Recommended** - General-purpose API |
+| **C++ (`cpp_infer`)** | 180 | - | ~145 MB | Baseline (YOLOv5 only) |
+| **Lua + Vectorized Tensor API** | **200** | +11% | ~150 MB | ✅ **Recommended** |
 | **Lua + `filter_yolo`** | 290 | +61% | ~150 MB | Legacy specialized API |
-| **Lua + Naive Tensor API** | 515 | +186% | ~160 MB | Poor performance (avoid) |
+| **Lua + Naive Tensor API** | 515 | +186% | ~160 MB | ❌ Avoid |
 
-**Key Takeaway**: The new vectorized Tensor API achieves **near-C++ performance** (only 10ms slower) while maintaining full generality. This proves that **generic APIs can match specialized implementations** with proper design.
+### Time Distribution Analysis
 
-*Note: Tested on Linux x64 AMD Ryzen 9 3900X 12-Core Processor. "Inference Time" includes initialization, image loading, preprocessing, inference, and postprocessing.*
+| Stage | Time | % |
+|-------|------|---|
+| ONNX Inference | ~100ms | **50%** |
+| Model Loading | ~80ms | One-time |
+| Image Load + Preprocess | ~15ms | 7.5% |
+| **Postprocess (Tensor API)** | **~4.5ms** | **2.2%** |
+
+**Key Takeaway**: The Tensor API postprocess is extremely efficient (~4.5ms). The bottleneck is ONNX inference (~100ms), which is determined by model complexity.
+
+*Note: Tested on Linux x64 AMD Ryzen 9 3900X 12-Core Processor.*
 
 ## �📂 Project Structure
 
@@ -166,42 +175,83 @@ local blob = img:to_blob()  -- Convert to CHW float32 tensor [C,H,W]
 
 #### `lua_nn` - Neural Network & Tensor Operations
 ```lua
-local nn = require "lua_nn"
+local nn = lua_nn
 
 -- Create inference session
-local session = nn.InferenceSession.new(model_path)
-session:warm_up(3)  -- Optional warmup
+local session = nn.Session.new(model_path)
+local outputs = session:run(input_tensor)
+local output = outputs["output0"]  -- Get output by name
 
--- Run inference
-local outputs = session:infer({input_blob})
-local output = outputs[1]  -- Get first output tensor
+-- ========== Level 1: Shape Operations (Zero-copy) ==========
+local sliced = output:slice(dim, start, end, step)  -- Slice along dimension
+local squeezed = output:squeeze(dim)                 -- Remove dimension
+local unsqueezed = output:unsqueeze(dim)             -- Add dimension
+local reshaped = output:reshape({-1, 85})            -- Reshape
+local transposed = output:transpose()                -- Transpose 2D
+local transposed = output:transpose_dims({1, 0, 2})  -- Permute dimensions
+local col = output:get_column(idx)                   -- Get single column
+local cols = output:slice_columns(start, end)        -- Slice columns
 
--- Tensor operations (Level 1-3)
--- Level 1: Shape manipulation
-local sliced = output:slice(0, 0, 1)      -- [1,N,M] -> [1,N,M]
-local squeezed = output:squeeze(0)        -- [1,N,M] -> [N,M]
-local reshaped = output:reshape({-1, 85}) -- Flatten to [N,85]
-local transposed = output:transpose(0, 1) -- Swap dimensions
+-- ========== Level 2: Math Operations ==========
+-- Element-wise operations
+local added = tensor:add(5.0)             -- Add scalar
+local added = tensor:add_tensor(other)    -- Add tensor
+local scaled = tensor:mul(2.0)            -- Multiply scalar
+local divided = tensor:div(2.0)           -- Divide scalar
 
--- Level 2: Math operations
-local added = tensor:add(5)               -- Element-wise add
-local scaled = tensor:mul(2.0)            -- Element-wise multiply
-local sum = tensor:sum()                  -- Reduce to scalar
-local max_val = tensor:max()              -- Find maximum value
-local argmax_idx = tensor:argmax()        -- Index of maximum
+-- In-place operations (avoid allocation)
+tensor:add_(5.0)   -- Modify in-place
+tensor:sub_(1.0)
+tensor:mul_(2.0)
+tensor:div_(2.0)
 
--- Level 3: Advanced operations
-local activated = tensor:sigmoid()        -- Apply sigmoid
-local normalized = tensor:softmax()       -- Apply softmax
-local top_k = tensor:topk_lua(5)         -- Get top 5 values and indices
-local table_data = tensor:to_table()     -- Convert to Lua table (SLOW!)
+-- Reduction operations
+local sum_val = tensor:sum(axis, keepdims)    -- Sum along axis
+local mean_val = tensor:mean(axis, keepdims)  -- Mean along axis
+local max_val = tensor:max(axis, keepdims)    -- Max along axis
+local min_val = tensor:min(axis, keepdims)    -- Min along axis
+local argmax_idx = tensor:argmax(axis)        -- Argmax (returns Lua table)
+local argmin_idx = tensor:argmin(axis)        -- Argmin (returns Lua table)
 
--- ⚡ NEW: Vectorized Filtering Operations (High Performance)
--- These methods enable near-C++ performance with generic Tensor API
-local indices = tensor:where_indices(threshold, "ge")  -- Get indices where tensor >= threshold
-local filtered = tensor:index_select(dim, indices)     -- Select elements at specific indices
-local columns = tensor:extract_columns({1, 5, 10})     -- Extract multiple columns (optimized for [C,N])
-local nz_indices = tensor:nonzero()                     -- Get indices of non-zero elements
+-- ⚡ Fused operation (single pass, recommended!)
+local result = tensor:max_with_argmax(axis)   -- Returns {values=Tensor, indices=table}
+local max_scores = result.values
+local class_ids = result.indices
+
+-- Activation functions
+local activated = tensor:sigmoid()
+local normalized = tensor:softmax(axis)
+local exp_t = tensor:exp()
+local log_t = tensor:log()
+
+-- Comparison operations
+local mask = tensor:gt(0.5)   -- Greater than
+local mask = tensor:ge(0.5)   -- Greater or equal
+local mask = tensor:lt(0.5)   -- Less than
+local mask = tensor:le(0.5)   -- Less or equal
+local mask = tensor:eq(0.5)   -- Equal
+
+-- ========== Level 3: Advanced Operations ==========
+-- ⚡ Vectorized filtering (High Performance!)
+local indices = tensor:where_indices(threshold, "ge")  -- Get indices where >= threshold
+local filtered = tensor:index_select(dim, indices)     -- Select by indices
+local columns = tensor:extract_columns(indices)        -- Extract columns -> {{row1}, {row2}, ...}
+local nz = tensor:nonzero()                            -- Non-zero indices
+
+-- TopK
+local result = tensor:topk_new(k, axis, largest)  -- Returns {values, indices}
+
+-- Gather/Concat/Split
+local gathered = tensor:gather(axis, indices_tensor)
+local concat = nn.Tensor.concat({t1, t2, t3}, axis)
+local splits = tensor:split(num_splits, axis)
+
+-- Data conversion
+local tbl = tensor:to_table()      -- Convert to Lua table (use after filtering!)
+local str = tensor:to_string(10)   -- String representation
+local val = tensor:get(idx)        -- Get single element (0-indexed)
+local val = tensor:at(i, j)        -- Get 2D element (0-indexed)
+tensor:set(idx, value)             -- Set single element
 ```
 
 #### `lua_utils` - Utility Functions
@@ -225,20 +275,25 @@ local scaled_box = utils.scale_boxes(box, orig_shape, new_shape)
 ```lua
 -- RECOMMENDED: Filter in C++, convert only small result set
 -- Example: YOLO detection with 8,400 boxes -> ~50 valid boxes
-local max_scores = scores:max(0, false)  -- [8400]
-local class_ids = scores:argmax(0)       -- Lua table [8400]
 
--- 🚀 KEY: Get valid indices in C++ (fast)
+-- ⚡ Step 1: Fused max + argmax (single pass over 672K elements)
+local result = scores:max_with_argmax(0)  -- {values=Tensor[8400], indices=table[8400]}
+local max_scores = result.values
+local class_ids = result.indices
+
+-- ⚡ Step 2: Get valid indices in C++ (fast filtering)
 local valid_indices = max_scores:where_indices(conf_thres, "ge")  -- Returns ~50 indices
 
--- 🚀 Extract only valid data (batch operation in C++)
+-- ⚡ Step 3: Extract only valid data (batch operation in C++)
 local filtered_boxes = boxes:extract_columns(valid_indices)  -- {{cx,cy,w,h}, ...}
 local filtered_scores = max_scores:index_select(0, valid_indices):to_table()  -- Only 50 elements
 
 -- Now loop over small filtered set (~50 iterations instead of 8,400!)
 for i = 1, #valid_indices do
+    local idx = valid_indices[i]
     local box_data = filtered_boxes[i]
     local score = filtered_scores[i]
+    local cls_id = class_ids[idx + 1]  -- Lua 1-indexed
     -- Process...
 end
 ```
@@ -279,11 +334,17 @@ for i = 1, 8400 do
 end
 ```
 
-**After (Fast - 190ms):**
+**After (Fast - 200ms):**
 ```lua
-local valid_indices = scores:where_indices(threshold, "ge")  -- C++ filters to ~50 indices
-local filtered_boxes = boxes:extract_columns(valid_indices)   -- Extract 50 boxes
-local filtered_scores = scores:index_select(0, valid_indices):to_table()  -- Convert 50 scores
+-- Fused max + argmax (single pass)
+local result = scores:max_with_argmax(0)
+local max_scores, class_ids = result.values, result.indices
+
+-- C++ filtering
+local valid_indices = max_scores:where_indices(threshold, "ge")  -- ~50 indices
+local filtered_boxes = boxes:extract_columns(valid_indices)       -- 50 boxes
+local filtered_scores = max_scores:index_select(0, valid_indices):to_table()
+
 for i = 1, #valid_indices do  -- Lua loop only 50 times!
     -- Process box...
 end
@@ -358,15 +419,16 @@ print(string.format("Found %d objects", #results))
 
 | Implementation | Time (ms) | Overhead | Code Flexibility | Status |
 |:---------------|----------:|:--------:|:----------------:|:------:|
-| C++ (`cpp_infer`) | 180 | - | ❌ Low (hardcoded) | Baseline |
-| **Lua + Vectorized Tensor API** | **190** | **+5.6%** | ✅ **High** | ✅ **Recommended** |
+| C++ (`cpp_infer`) | 180 | - | ❌ Low (hardcoded) | Baseline (YOLOv5) |
+| **Lua + Vectorized Tensor API** | **200** | **+11%** | ✅ **High** | ✅ **Recommended** |
 | Lua + `filter_yolo` | 290 | +61% | ⚠️ Medium (YOLO-specific) | Legacy |
 | Lua + Naive Tensor API | 515 | +186% | ✅ High | ❌ Avoid |
 
 **Key Insights:**
 - ✅ **Vectorized Tensor API achieves near-C++ performance** while remaining fully generic
-- ✅ Proper API design eliminates the need for task-specific optimizations
+- ✅ `max_with_argmax()` fuses two operations into single pass (saves ~0.35ms)
 - ✅ `where_indices()` + `extract_columns()` + `index_select()` enable high-performance filtering
+- ✅ Postprocess only takes ~4.5ms (2.2% of total time)
 - ⚠️ Legacy `filter_yolo()` retained for backward compatibility but no longer needed
 
 **Migration Path:** All `*_tensor_*.lua` scripts have been updated to use the vectorized API. See [scripts/yolo11_tensor_detector.lua](scripts/yolo11_tensor_detector.lua) for reference implementation.
@@ -378,8 +440,62 @@ print(string.format("Found %d objects", #results))
 ./build/model_infer scripts/your_script.lua models/model.onnx images/test.jpg
 
 # Test tensor operations
-./build/test_tensor lua scripts/test_tensor_api.lua
+./build/test_tensor scripts/test_tensor_api.lua
 
 # Benchmark performance
 time ./build/model_infer scripts/your_script.lua models/model.onnx images/test.jpg
+```
+
+## 🧪 Test Results
+
+### Tensor API Unit Tests
+
+All 98 unit tests pass, covering:
+
+| Category | Tests | Description |
+|----------|-------|-------------|
+| Level 1: Shape | 15 | slice, squeeze, reshape, transpose |
+| Level 2: Math | 25 | add, sub, mul, div, in-place ops |
+| Level 3: Reduction | 12 | sum, mean, max, min, argmax, argmin |
+| Level 4: Activation | 6 | sigmoid, softmax, exp, log |
+| Level 5: Comparison | 5 | gt, ge, lt, le, eq |
+| Level 6: Advanced | 20 | where_indices, index_select, extract_columns, max_with_argmax |
+| Level 7: Gather/Split | 7 | gather, concat, split |
+| Level 8: Non-contiguous | 8 | Operations on sliced tensors |
+
+```bash
+# Run all tests
+./build/test_tensor scripts/test_tensor_api.lua
+
+# Expected output:
+# 测试总结: 98/98 通过
+# ✓ 所有测试通过!
+```
+
+### YOLO Detection Tests
+
+| Script | Model | Detections | Status |
+|--------|-------|------------|--------|
+| yolo11_tensor_detector.lua | yolo11n.onnx | 3 (person, person, tie) | ✅ |
+| yolo11_tensor_seg.lua | yolo11n-seg.onnx | 3 | ✅ |
+| yolo11_tensor_pose.lua | yolo11n-pose.onnx | 2 | ✅ |
+| yolov5_tensor_detector.lua | yolov5n.onnx | 3 | ✅ |
+
+### Postprocess Timing Breakdown
+
+Detailed timing for YOLO11n postprocess (640x640, 8400 boxes):
+
+```
+Operation                        Time
+─────────────────────────────────────
+slice+squeeze+cont boxes         0.02 ms
+slice+squeeze+cont scores        3.77 ms  (672K elements)
+max_with_argmax (fused)          0.57 ms
+where_indices                    0.07 ms
+extract_columns                  0.02 ms
+index_select + to_table          0.01 ms
+build proposals (Lua loop)       0.02 ms
+NMS                              0.01 ms
+─────────────────────────────────────
+Total Postprocess               ~4.5 ms
 ```
