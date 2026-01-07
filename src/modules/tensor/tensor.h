@@ -85,6 +85,12 @@ public:
      */
     Tensor extract_columns_tensor(const std::vector<int64_t>& cols) const;
 
+    /**
+     * 提取指定列直接返回 Lua table (避免额外的 transpose + to_table)
+     * 返回格式: {{col1_data...}, {col2_data...}, ...}
+     */
+    LuaIntf::LuaRef extract_columns_lua(lua_State* L, const std::vector<int64_t>& cols) const;
+
     // ========== 属性访问 ==========
 
     std::vector<int64_t> shape() const { return shape_; }
@@ -95,9 +101,9 @@ public:
     bool is_contiguous() const { return contiguous_; }
 
     /**
-     * 获取设备类型
+     * 获取设备类型（使用缓存，避免虚函数调用）
      */
-    DeviceType device() const { return storage_->device(); }
+    DeviceType device() const { return device_cache_; }
 
     /**
      * 获取底层存储
@@ -184,6 +190,12 @@ public:
     Tensor div(const Tensor& other) const;
     Tensor div(float scalar) const;
 
+    // In-place 操作（避免内存分配）
+    Tensor& add_(float scalar);
+    Tensor& sub_(float scalar);
+    Tensor& mul_(float scalar);
+    Tensor& div_(float scalar);
+
     Tensor sum(int axis = -1, bool keepdims = false) const;
     Tensor mean(int axis = -1, bool keepdims = false) const;
     Tensor max(int axis = -1, bool keepdims = false) const;
@@ -191,6 +203,13 @@ public:
 
     LuaIntf::LuaRef argmax_lua(lua_State* L, int axis = -1) const;
     LuaIntf::LuaRef argmin_lua(lua_State* L, int axis = -1) const;
+
+    /**
+     * 融合 max + argmax 操作（单次遍历）
+     * 返回 Lua table: {values = Tensor, indices = table}
+     * 等价于 PyTorch 的 torch.max(tensor, dim) 返回 (values, indices)
+     */
+    LuaIntf::LuaRef max_with_argmax(lua_State* L, int axis = -1) const;
 
     Tensor sigmoid() const;
     Tensor softmax(int axis = -1) const;
@@ -250,6 +269,7 @@ private:
     std::vector<int64_t> strides_;
     int64_t offset_;
     bool contiguous_;
+    DeviceType device_cache_;  // 缓存设备类型，避免虚函数调用
 
     // 内部辅助方法
     int64_t compute_offset(const std::vector<int64_t>& indices) const;
@@ -258,8 +278,12 @@ private:
     void normalize_axis(int& axis) const;
     Tensor contiguous_copy() const;
 
-    // 检查是否在 CPU 上
-    void check_cpu() const;
+    // 检查是否在 CPU 上（内联热路径）
+    inline void check_cpu() const {
+        if (__builtin_expect(device_cache_ != DeviceType::CPU, 0)) {
+            throw std::runtime_error("Operation requires CPU tensor");
+        }
+    }
 };
 
 } // namespace tensor
