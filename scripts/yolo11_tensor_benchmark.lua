@@ -17,6 +17,14 @@ Model.config = {
     labels = coco_labels  -- 使用公共库中的COCO labels
 }
 
+-- C++ Preprocess Configuration (使用C++预处理函数)
+Model.preprocess_config = {
+    type = "letterbox",
+    input_size = {640, 640},
+    stride = 32,
+    fill_value = 114
+}
+
 -- Timing accumulators
 Model.timings = {
     -- Preprocess
@@ -36,6 +44,10 @@ Model.timings = {
 Model.iteration_count = 0
 Model.print_every_n = 1  -- Print timing summary after each iteration for benchmarking
 
+-- Lua fallback implementation with detailed timing (仅用于预处理性能分析)
+-- Note: C++ preprocess is faster but doesn't provide timing breakdown
+-- Uncomment this function to benchmark preprocess stages separately
+--[[
 function Model.preprocess(img)
     local w, h = img.width, img.height
     local target_h, target_w = table.unpack(Model.config.input_size)
@@ -81,6 +93,7 @@ function Model.preprocess(img)
 
     return input_tensor, meta
 end
+--]]
 
 function Model.postprocess(outputs, meta)
     local output = outputs["output0"]

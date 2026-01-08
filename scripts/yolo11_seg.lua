@@ -16,16 +16,22 @@ Model.config = {
     labels = coco_labels  -- 使用公共库中的COCO labels
 }
 
-function Model.preprocess(img)
-    -- 使用公共库的letterbox函数
-    local input_tensor, meta = preprocess_lib.letterbox(img, Model.config.input_size, Model.config.stride)
+-- C++ Preprocess Configuration (使用C++预处理函数)
+Model.preprocess_config = {
+    type = "letterbox",
+    input_size = {640, 640},
+    stride = 32,
+    fill_value = 114
+}
 
-    -- 添加seg脚本需要的额外meta字段
-    meta.input_w = img.width
-    meta.input_h = img.height
-
-    return input_tensor, meta
-end
+-- Lua fallback implementation (仅在C++预处理不可用时使用)
+-- Note: C++ preprocess doesn't add input_w/input_h, but they match ori_w/ori_h
+-- function Model.preprocess(img)
+--     local input_tensor, meta = preprocess_lib.letterbox(img, Model.config.input_size, Model.config.stride)
+--     meta.input_w = img.width
+--     meta.input_h = img.height
+--     return input_tensor, meta
+-- end
 
 function Model.postprocess(outputs, meta)
     -- outputs: output0 (boxes+masks_coeffs), output1 (proto_masks)
