@@ -14,8 +14,8 @@ IMAGE_DIR="$PROJECT_DIR/images"
 ITERATIONS=${1:-3}
 
 # Check if build exists
-if [ ! -f "$BUILD_DIR/model_infer" ]; then
-    echo "Error: model_infer not found. Please build the project first."
+if [ ! -f "$BUILD_DIR/lua_runner" ]; then
+    echo "Error: lua_runner not found. Please build the project first."
     echo "  mkdir build && cd build && cmake .. && make"
     exit 1
 fi
@@ -47,11 +47,8 @@ declare -a TESTS=(
     "yolov5_detector.lua,yolov5n.onnx,YOLOv5n Detection (Legacy)"
 )
 
-# Results file
-RESULTS_FILE="$PROJECT_DIR/benchmark_results.txt"
-echo "Benchmark Results - $(date)" > "$RESULTS_FILE"
-echo "Iterations: $ITERATIONS" >> "$RESULTS_FILE"
-echo "========================================" >> "$RESULTS_FILE"
+# Results storage (in-memory array instead of file)
+declare -a RESULTS=()
 
 # Function to measure execution time and save full output for accuracy validation
 measure_time_and_save_output() {
@@ -118,13 +115,13 @@ for test_config in "${TESTS[@]}"; do
     echo -e "${BLUE}[TEST]${NC} $description"
 
     # Warmup run (not counted)
-    "$BUILD_DIR/model_infer" "$script_path" "$model_path" "$image_path" > /dev/null 2>&1
+    "$BUILD_DIR/lua_runner" "$script_path" "$model_path" "$image_path" > /dev/null 2>&1
 
     total_time=0
     success=true
     times=()
     detections=()
-    cmd="\"$BUILD_DIR/model_infer\" \"$script_path\" \"$model_path\" \"$image_path\""
+    cmd="\"$BUILD_DIR/lua_runner\" \"$script_path\" \"$model_path\" \"$image_path\""
 
     # Save first run output for accuracy validation
     first_output_file="$PROJECT_DIR/.bench_output_$$_$(echo "$script" | sed 's/[^a-zA-Z0-9]/_/g')"
@@ -173,19 +170,18 @@ for test_config in "${TESTS[@]}"; do
 
         if [ "$det_consistent" = true ]; then
             echo -e "${GREEN}[PASS]${NC} Avg: ${avg_time}ms, Min: ${min_time}ms, Max: ${max_time}ms | Detections: ${det_count}"
-            echo "$description: avg=${avg_time}ms min=${min_time}ms max=${max_time}ms detections=${det_count}" >> "$RESULTS_FILE"
+            RESULTS+=("$description: avg=${avg_time}ms min=${min_time}ms max=${max_time}ms detections=${det_count}")
         else
             echo -e "${YELLOW}[WARN]${NC} Avg: ${avg_time}ms | Detections: inconsistent ${detections[*]}"
-            echo "$description: avg=${avg_time}ms detections=INCONSISTENT" >> "$RESULTS_FILE"
+            RESULTS+=("$description: avg=${avg_time}ms detections=INCONSISTENT")
         fi
     else
-        echo "$description: FAILED" >> "$RESULTS_FILE"
+        RESULTS+=("$description: FAILED")
     fi
     echo ""
 done
 
 echo "========================================"
-echo "Results saved to: $RESULTS_FILE"
 echo ""
 
 # Also run C++ baseline if available
@@ -229,7 +225,7 @@ if [ -f "$BUILD_DIR/cpp_infer" ]; then
         det_count="${detections[0]}"
 
         echo -e "${GREEN}[PASS]${NC} Avg: ${avg_time}ms, Min: ${min_time}ms, Max: ${max_time}ms | Detections: ${det_count}"
-        echo "C++ Baseline (YOLOv5n): avg=${avg_time}ms min=${min_time}ms max=${max_time}ms detections=${det_count}" >> "$RESULTS_FILE"
+        RESULTS+=("C++ Baseline (YOLOv5n): avg=${avg_time}ms min=${min_time}ms max=${max_time}ms detections=${det_count}")
     fi
     echo ""
 fi
@@ -238,7 +234,12 @@ echo ""
 echo "========================================"
 echo "  Summary"
 echo "========================================"
-cat "$RESULTS_FILE"
+echo "Benchmark Results - $(date)"
+echo "Iterations: $ITERATIONS"
+echo "========================================"
+for result in "${RESULTS[@]}"; do
+    echo "$result"
+done
 
 echo ""
 echo "========================================"
@@ -281,11 +282,11 @@ compare_detections() {
 
 # Extract detection counts for quick comparison
 echo "Detection Counts:"
-yolo11n_tensor=$(grep "YOLO11n Detection (Tensor API)" "$RESULTS_FILE" | grep -oP 'detections=\K\d+' || echo "N/A")
-yolo11n_legacy=$(grep "YOLO11n Detection (Legacy)" "$RESULTS_FILE" | grep -oP 'detections=\K\d+' || echo "N/A")
-yolov5n_tensor=$(grep "YOLOv5n Detection (Tensor API)" "$RESULTS_FILE" | grep -oP 'detections=\K\d+' || echo "N/A")
-yolov5n_legacy=$(grep "YOLOv5n Detection (Legacy)" "$RESULTS_FILE" | grep -oP 'detections=\K\d+' || echo "N/A")
-cpp_baseline=$(grep "C++ Baseline" "$RESULTS_FILE" | grep -oP 'detections=\K\d+' || echo "N/A")
+yolo11n_tensor=$(printf '%s\n' "${RESULTS[@]}" | grep "YOLO11n Detection (Tensor API)" | grep -oP 'detections=\K\d+' || echo "N/A")
+yolo11n_legacy=$(printf '%s\n' "${RESULTS[@]}" | grep "YOLO11n Detection (Legacy)" | grep -oP 'detections=\K\d+' || echo "N/A")
+yolov5n_tensor=$(printf '%s\n' "${RESULTS[@]}" | grep "YOLOv5n Detection (Tensor API)" | grep -oP 'detections=\K\d+' || echo "N/A")
+yolov5n_legacy=$(printf '%s\n' "${RESULTS[@]}" | grep "YOLOv5n Detection (Legacy)" | grep -oP 'detections=\K\d+' || echo "N/A")
+cpp_baseline=$(printf '%s\n' "${RESULTS[@]}" | grep "C++ Baseline" | grep -oP 'detections=\K\d+' || echo "N/A")
 
 echo "  YOLO11n Tensor: $yolo11n_tensor | Legacy: $yolo11n_legacy"
 echo "  YOLOv5n Tensor: $yolov5n_tensor | Legacy: $yolov5n_legacy | C++: $cpp_baseline"
