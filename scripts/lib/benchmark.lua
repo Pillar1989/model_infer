@@ -49,15 +49,35 @@ function M.print_timing_summary(model_name, timings, config)
     print_separator(width)
 
     -- 预处理部分
-    print("\nPREPROCESS (Lua → C++ calls):")
+    print("\nPREPROCESS:")
     local total_preprocess = 0
+    local has_preprocess_data = false
+
+    -- 检查是否有预处理计时数据
     for _, item in ipairs(config.preprocess_items) do
-        local label, key = item[1], item[2]
-        local time = avg(timings[key])
-        print_timing_item(label, time)
-        total_preprocess = total_preprocess + time
+        local key = item[2]
+        if #timings[key] > 0 then
+            has_preprocess_data = true
+            break
+        end
     end
-    print_timing_item("TOTAL PREPROCESS", total_preprocess)
+
+    if has_preprocess_data then
+        -- Lua 预处理模式（有计时数据）
+        print("  Mode: Lua → C++ calls")
+        for _, item in ipairs(config.preprocess_items) do
+            local label, key = item[1], item[2]
+            local time = avg(timings[key])
+            print_timing_item(label, time)
+            total_preprocess = total_preprocess + time
+        end
+        print_timing_item("TOTAL PREPROCESS", total_preprocess)
+    else
+        -- C++ 预处理模式（无计时数据）
+        print("  Mode: C++ preprocess (via preprocess_config)")
+        print("  Note: Preprocess executed in C++ layer, no Lua timing data available")
+        print("        Uncomment Model.preprocess function to benchmark Lua preprocess")
+    end
 
     -- 后处理部分
     print("\nPOSTPROCESS (Lua + Tensor API):")
@@ -81,9 +101,16 @@ function M.print_timing_summary(model_name, timings, config)
 
     -- 总计
     print("\nOVERALL:")
-    print_timing_item("Preprocess (Lua→C++)", total_preprocess)
-    print_timing_item("Postprocess (Lua+Tensor)", total_postprocess)
-    print_timing_item("TOTAL Lua Overhead", total_preprocess + total_postprocess)
+    if has_preprocess_data then
+        print_timing_item("Preprocess (Lua→C++)", total_preprocess)
+        print_timing_item("Postprocess (Lua+Tensor)", total_postprocess)
+        print_timing_item("TOTAL Lua Overhead", total_preprocess + total_postprocess)
+    else
+        print_timing_item("Preprocess (C++)", 0, width)
+        print("    └─ (No Lua timing data - executed in C++ layer)")
+        print_timing_item("Postprocess (Lua+Tensor)", total_postprocess)
+        print_timing_item("TOTAL Lua Overhead", total_postprocess)
+    end
 
     -- 注释
     print_separator(width)
