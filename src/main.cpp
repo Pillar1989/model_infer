@@ -1,42 +1,15 @@
 #include <iostream>
 #include <string>
-#include <fstream>
 #include <chrono>
 #include <iomanip>
-#include <algorithm>
 #include <opencv2/opencv.hpp>
 #include "LuaIntf.h"
+#include "main_util.h"
 
 // 模块头文件
 #include "modules/lua_cv.h"
 #include "modules/lua_nn.h"
 #include "modules/lua_utils.h"
-
-// 内存监控结构
-struct MemoryInfo {
-    size_t vm_rss_kb = 0;   // 物理内存（KB）
-    size_t vm_size_kb = 0;  // 虚拟内存（KB）
-
-    void update() {
-        std::ifstream status("/proc/self/status");
-        std::string line;
-        while (std::getline(status, line)) {
-            if (line.find("VmRSS:") == 0) {
-                sscanf(line.c_str(), "VmRSS: %zu", &vm_rss_kb);
-            } else if (line.find("VmSize:") == 0) {
-                sscanf(line.c_str(), "VmSize: %zu", &vm_size_kb);
-            }
-        }
-    }
-
-    std::string to_string() const {
-        std::ostringstream oss;
-        oss << "RSS=" << std::fixed << std::setprecision(1)
-            << (vm_rss_kb / 1024.0) << "MB, "
-            << "VM=" << (vm_size_kb / 1024.0) << "MB";
-        return oss.str();
-    }
-};
 
 // 推理上下文
 struct InferenceContext {
@@ -79,13 +52,6 @@ void print_usage(const char* prog_name) {
     std::cout << "Test Examples:\n";
     std::cout << "  " << prog_name << " tests/run_all_tests.lua\n";
     std::cout << "  " << prog_name << " tests/test_basic.lua\n";
-}
-
-bool is_video_file(const std::string& filename) {
-    std::string ext = filename.substr(filename.find_last_of(".") + 1);
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    return (ext == "mp4" || ext == "avi" || ext == "mov" || ext == "mkv" ||
-            ext == "flv" || ext == "wmv" || ext == "m4v");
 }
 
 // 初始化推理上下文
