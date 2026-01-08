@@ -44,12 +44,14 @@ struct InferenceContext {
     std::unique_ptr<lua_nn::Session> session;
     LuaIntf::LuaRef preprocess;
     LuaIntf::LuaRef postprocess;
+    LuaIntf::LuaRef preprocess_config;  // 新增：C++预处理配置
 
     ~InferenceContext() {
         // 重要：先清空 LuaRef 对象，再关闭 Lua 状态
         // 否则 LuaRef 析构时会访问已关闭的 Lua 状态
         preprocess = LuaIntf::LuaRef();
         postprocess = LuaIntf::LuaRef();
+        preprocess_config = LuaIntf::LuaRef();
 
         if (L) {
             lua_close(L);
@@ -119,9 +121,19 @@ std::unique_ptr<InferenceContext> init_inference(const std::string& script_path,
 
     ctx->preprocess = model["preprocess"];
     ctx->postprocess = model["postprocess"];
+    ctx->preprocess_config = model["preprocess_config"];  // 新增：读取C++预处理配置
 
-    if (!ctx->preprocess.isFunction() || !ctx->postprocess.isFunction()) {
-        throw std::runtime_error("Model must have preprocess and postprocess functions");
+    // postprocess必须存在
+    if (!ctx->postprocess.isFunction()) {
+        throw std::runtime_error("Model must have postprocess function");
+    }
+
+    // preprocess可以是函数(Lua模式)或通过preprocess_config(C++模式)提供
+    bool has_lua_preprocess = ctx->preprocess.isFunction();
+    bool has_cpp_preprocess = ctx->preprocess_config.isValid() && ctx->preprocess_config.isTable();
+
+    if (!has_lua_preprocess && !has_cpp_preprocess) {
+        throw std::runtime_error("Model must have either preprocess function or preprocess_config table");
     }
 
     return ctx;
@@ -129,7 +141,28 @@ std::unique_ptr<InferenceContext> init_inference(const std::string& script_path,
 
 // 执行推理
 LuaIntf::LuaRef run_inference(InferenceContext* ctx, lua_cv::Image& img) {
-    // 预处理
+    // 尝试使用C++预处理
+    if (ctx->preprocess_config.isValid() && ctx->preprocess_config.isTable()) {
+        std::string type = ctx->preprocess_config.get<std::string>("type");
+
+        auto& registry = lua_cv::PreprocessRegistry::instance();
+
+        if (registry.has(type)) {
+            // 执行C++预处理
+            auto result = registry.run(type, img, ctx->L, ctx->preprocess_config);
+
+            // 推理
+            LuaIntf::LuaRef outputs = ctx->session->run(ctx->L, result.tensor);
+
+            // 后处理
+            return ctx->postprocess.call<LuaIntf::LuaRef>(outputs, result.meta);
+        } else {
+            std::cerr << "Warning: Unknown preprocess type '" << type
+                      << "', falling back to Lua\n";
+        }
+    }
+
+    // 回退到Lua预处理
     ctx->preprocess.pushToStack();
     LuaIntf::LuaRef::fromValue(ctx->L, img).pushToStack();
 
