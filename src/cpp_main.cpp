@@ -5,11 +5,9 @@
 #include <cmath>
 #include <algorithm>
 #include <numeric>
-#include <iomanip>
-#include <fstream>
-#include <sstream>
 #include <opencv2/opencv.hpp>
 #include "inference/inference.h"
+#include "main_util.h"
 
 // Configuration
 const int INPUT_W = 640;
@@ -17,46 +15,6 @@ const int INPUT_H = 640;
 const float CONF_THRES = 0.25f;
 const float IOU_THRES = 0.45f;
 const int STRIDE = 32;
-
-// COCO labels
-const std::vector<std::string> LABELS = {
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-    "hair drier", "toothbrush"
-};
-
-// ============ Memory Monitoring ============
-
-struct MemoryInfo {
-    size_t vm_rss_kb = 0;
-    size_t vm_size_kb = 0;
-
-    void update() {
-        std::ifstream status("/proc/self/status");
-        std::string line;
-        while (std::getline(status, line)) {
-            if (line.find("VmRSS:") == 0) {
-                sscanf(line.c_str(), "VmRSS: %zu", &vm_rss_kb);
-            } else if (line.find("VmSize:") == 0) {
-                sscanf(line.c_str(), "VmSize: %zu", &vm_size_kb);
-            }
-        }
-    }
-
-    std::string to_string() const {
-        std::ostringstream oss;
-        oss << "RSS=" << std::fixed << std::setprecision(1)
-            << (vm_rss_kb / 1024.0) << "MB, "
-            << "VM=" << (vm_size_kb / 1024.0) << "MB";
-        return oss.str();
-    }
-};
 
 // ============ Data Structures ============
 
@@ -319,8 +277,8 @@ void print_results(const std::vector<Detection>& results) {
     std::cout << "\n=== Detection Results ===\n";
     for (size_t i = 0; i < results.size(); ++i) {
         const auto& det = results[i];
-        std::string label = (det.class_id >= 0 && det.class_id < LABELS.size())
-                          ? LABELS[det.class_id] : "unknown";
+        std::string label = (det.class_id >= 0 && det.class_id < COCO_LABELS.size())
+                          ? COCO_LABELS[det.class_id] : "unknown";
         std::cout << "Box " << (i+1) << ": " << label << " "
                   << "(" << det.x << ", " << det.y << ", " << det.w << ", " << det.h << ") "
                   << "conf=" << det.score << "\n";
@@ -332,8 +290,8 @@ void draw_detections(cv::Mat& frame, const std::vector<Detection>& detections) {
     for (const auto& det : detections) {
         cv::rectangle(frame, cv::Rect(det.x, det.y, det.w, det.h),
                      cv::Scalar(0, 255, 0), 2);
-        std::string label = (det.class_id >= 0 && det.class_id < LABELS.size())
-                          ? LABELS[det.class_id] : "unknown";
+        std::string label = (det.class_id >= 0 && det.class_id < COCO_LABELS.size())
+                          ? COCO_LABELS[det.class_id] : "unknown";
         std::string text = label + " " + std::to_string(det.score).substr(0, 4);
         cv::putText(frame, text, cv::Point(det.x, det.y - 5),
                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
@@ -341,12 +299,6 @@ void draw_detections(cv::Mat& frame, const std::vector<Detection>& detections) {
 }
 
 // ============ Utilities ============
-
-bool is_video(const std::string& path) {
-    std::string ext = path.substr(path.find_last_of(".") + 1);
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    return (ext == "mp4" || ext == "avi" || ext == "mov" || ext == "mkv");
-}
 
 void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " <model.onnx> <input> [show] [save=output.mp4] [frames=N]\n";
@@ -416,7 +368,7 @@ int main(int argc, char* argv[]) {
             return postprocess_yolo(output.data(), cached_cfg, meta, CONF_THRES, IOU_THRES);
         };
 
-        if (is_video(input_path)) {
+        if (is_video_file(input_path)) {
             // ========== Video inference ==========
             cv::VideoCapture cap(input_path);
             if (!cap.isOpened()) {
