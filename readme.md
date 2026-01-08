@@ -487,31 +487,12 @@ print(string.format("Found %d objects", #results))
 # Run your script
 ./build/model_infer scripts/your_script.lua models/model.onnx images/test.jpg
 
-# Test tensor operations
-./build/test_tensor scripts/test_tensor_api.lua
+# Run all tests (new modular approach)
+./build/test_tensor tests/run_all_tests.lua
+
+# Or run individual test modules
+./build/test_tensor tests/test_basic.lua
 
 # Benchmark performance
 time ./build/model_infer scripts/your_script.lua models/model.onnx images/test.jpg
-```
-
-## 🧪 Test Results
-
-### Tensor API Unit Tests
-
-All 98 unit tests pass, covering:
-
-| Category | Tests | Description |
-|----------|-------|-------------|
-| Level 1: Shape | 15 | slice, squeeze, reshape, transpose |
-| Level 2: Math | 25 | add, sub, mul, div, in-place ops |
-| Level 3: Reduction | 12 | sum, mean, max, min, argmax, argmin |
-| Level 4: Activation | 6 | sigmoid, softmax, exp, log |
-| Level 5: Comparison | 5 | gt, ge, lt, le, eq |
-| Level 6: Advanced | 20 | where_indices, index_select, extract_columns, max_with_argmax |
-| Level 7: Gather/Split | 7 | gather, concat, split |
-| Level 8: Non-contiguous | 8 | Operations on sliced tensors |
-
-```bash
-# Run all tests
-./build/test_tensor scripts/test_tensor_api.lua
 ```
