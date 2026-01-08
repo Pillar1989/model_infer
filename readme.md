@@ -218,9 +218,44 @@ Total Postprocess               ~4.5 ms
 ### Architecture Overview
 
 The inference pipeline consists of three stages:
-1. **Preprocessing** (Lua + OpenCV): Load and prepare image data
+1. **Preprocessing** (C++ or Lua + OpenCV): Load and prepare image data
 2. **Inference** (C++ + ONNX Runtime): Execute the neural network
 3. **Postprocessing** (Lua): Parse outputs and extract results
+
+#### C++ Preprocessing (Recommended)
+
+Since v1.1, you can use optimized C++ preprocessing functions by adding `preprocess_config` to your Lua script:
+
+```lua
+-- Enable C++ preprocessing for YOLO detection/segmentation/pose
+Model.preprocess_config = {
+    type = "letterbox",
+    input_size = {640, 640},
+    stride = 32,
+    fill_value = 114
+}
+
+-- Enable C++ preprocessing for classification models
+Model.preprocess_config = {
+    type = "resize_center_crop",
+    size = 224
+}
+
+-- Lua fallback (optional, for testing/comparison)
+-- function Model.preprocess(img)
+--     return preprocess_lib.letterbox(img, {640, 640}, 32)
+-- end
+```
+
+**Benefits:**
+- ✅ **Slightly faster**: Eliminates Lua function call overhead
+- ✅ **Type-safe**: Direct C++ implementation
+- ✅ **Extensible**: Easy to add new preprocessing types via registry
+- ✅ **Backward compatible**: Falls back to Lua if config not provided
+
+**Available preprocessing types:**
+- `letterbox`: Resize with aspect ratio preservation + padding (for YOLO models)
+- `resize_center_crop`: Short edge resize + center crop (for classification)
 
 ### Available Lua Modules
 
