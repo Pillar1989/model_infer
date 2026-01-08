@@ -46,28 +46,28 @@ set_target_properties(onnxruntime PROPERTIES
 )
 
 # ==========================================================
-# 4. Main Application
+# 4. Main Application (Lua Runner)
 # ==========================================================
 # 收集模块源文件
 file(GLOB MODULE_SOURCES "src/modules/*.cpp")
 file(GLOB TENSOR_SOURCES "src/modules/tensor/*.cpp")
 file(GLOB BINDING_SOURCES "src/bindings/*.cpp")
 
-add_executable(model_infer
+add_executable(lua_runner
     src/main.cpp
     ${MODULE_SOURCES}
     ${TENSOR_SOURCES}
     ${BINDING_SOURCES}
 )
 
-target_link_libraries(model_infer PRIVATE 
-    LuaIntf 
-    lua 
-    ${OpenCV_LIBS} 
+target_link_libraries(lua_runner PRIVATE
+    LuaIntf
+    lua
+    ${OpenCV_LIBS}
     onnxruntime
 )
 
-target_include_directories(model_infer PRIVATE
+target_include_directories(lua_runner PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/tensor"
@@ -79,11 +79,11 @@ target_include_directories(model_infer PRIVATE
 
 # Optional: Link dl library for Linux
 if(UNIX AND NOT APPLE)
-    target_link_libraries(model_infer PRIVATE dl)
+    target_link_libraries(lua_runner PRIVATE dl)
 endif()
 
 # 确保运行时能找到libonnxruntime.so
-set_target_properties(model_infer PROPERTIES
+set_target_properties(lua_runner PROPERTIES
     BUILD_RPATH "${ONNXRUNTIME_LIB_DIR}"
     INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}"
 )
@@ -104,39 +104,4 @@ set_target_properties(cpp_infer PROPERTIES
     INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}"
 )
 
-# ==========================================================
-# 6. Tensor API Test Program
-# ==========================================================
-add_executable(test_tensor
-    src/test_main.cpp
-    ${MODULE_SOURCES}
-    ${TENSOR_SOURCES}
-    ${BINDING_SOURCES}
-)
-
-target_link_libraries(test_tensor PRIVATE 
-    LuaIntf 
-    lua 
-    ${OpenCV_LIBS} 
-    onnxruntime
-)
-
-target_include_directories(test_tensor PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/modules"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/modules/tensor"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/bindings"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/utils"
-    ${OpenCV_INCLUDE_DIRS}
-    ${ONNXRUNTIME_INCLUDE_DIRS}
-)
-
-if(UNIX AND NOT APPLE)
-    target_link_libraries(test_tensor PRIVATE dl)
-endif()
-
-set_target_properties(test_tensor PROPERTIES
-    BUILD_RPATH "${ONNXRUNTIME_LIB_DIR}"
-    INSTALL_RPATH "${ONNXRUNTIME_LIB_DIR}"
-)
 

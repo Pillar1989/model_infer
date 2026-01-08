@@ -59,17 +59,24 @@ struct InferenceContext {
 };
 
 void print_usage(const char* prog_name) {
-    std::cout << "Usage: " << prog_name << " <script.lua> <model.onnx> <input> [options]\n";
-    std::cout << "\nInput: image file (.jpg, .png) or video file (.mp4, .avi, .mov)\n";
+    std::cout << "Usage:\n";
+    std::cout << "  1. Inference mode: " << prog_name << " <script.lua> <model.onnx> <input> [options]\n";
+    std::cout << "  2. Test mode:      " << prog_name << " <test_script.lua>\n";
+    std::cout << "\n=== Inference Mode ===\n";
+    std::cout << "Input: image file (.jpg, .png) or video file (.mp4, .avi, .mov)\n";
     std::cout << "\nOptions:\n";
     std::cout << "  show          - Display window during processing\n";
     std::cout << "  save=OUTPUT   - Save output (for video, e.g., save=output.mp4)\n";
     std::cout << "  frames=N      - Process only first N frames (video only)\n";
     std::cout << "  skip=N        - Process every Nth frame (video only, default: 1)\n";
-    std::cout << "\nExamples:\n";
+    std::cout << "\nInference Examples:\n";
     std::cout << "  " << prog_name << " scripts/yolo11_detector.lua models/yolo11n.onnx images/zidane.jpg show\n";
     std::cout << "  " << prog_name << " scripts/yolo11_seg.lua models/yolo11n-seg.onnx images/person.mp4 show\n";
     std::cout << "  " << prog_name << " scripts/yolo11_seg.lua models/yolo11n-seg.onnx video.mp4 save=out.mp4 frames=100\n";
+    std::cout << "\n=== Test Mode ===\n";
+    std::cout << "Test Examples:\n";
+    std::cout << "  " << prog_name << " tests/run_all_tests.lua\n";
+    std::cout << "  " << prog_name << " tests/test_basic.lua\n";
 }
 
 bool is_video_file(const std::string& filename) {
@@ -279,7 +286,65 @@ void draw_detections(cv::Mat& frame, LuaIntf::LuaRef& detections) {
     }
 }
 
+// 运行测试脚本
+int run_test_script(const std::string& script_path) {
+    std::cout << "\n========== 运行Lua测试脚本 ==========\n";
+    std::cout << "加载脚本: " << script_path << "\n";
+
+    // 检查文件是否存在
+    std::ifstream file(script_path);
+    if (!file.good()) {
+        std::cerr << "错误: 找不到脚本文件: " << script_path << "\n";
+        return 1;
+    }
+    file.close();
+
+    // 创建Lua状态机
+    lua_State* L = luaL_newstate();
+    if (!L) {
+        std::cerr << "错误: 无法创建Lua状态机\n";
+        return 1;
+    }
+    luaL_openlibs(L);
+
+    // 注册所有模块
+    std::cout << "注册模块...\n";
+    lua_cv::register_module(L);
+    lua_nn::register_module(L);
+    lua_utils::register_module(L);
+
+    // 加载并运行脚本
+    std::cout << "执行测试脚本...\n\n";
+    int result = luaL_dofile(L, script_path.c_str());
+
+    if (result != LUA_OK) {
+        std::cerr << "\n错误: 脚本执行失败: " << lua_tostring(L, -1) << "\n";
+        lua_pop(L, 1);
+        lua_close(L);
+        return 1;
+    }
+
+    lua_close(L);
+    std::cout << "\n✓ Lua脚本测试完成!\n";
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    std::string first_arg = argv[1];
+
+    // 判断是测试模式还是推理模式
+    // 测试模式：只有一个参数，且是 .lua 文件
+    if (argc == 2 && first_arg.size() > 4 &&
+        first_arg.substr(first_arg.size() - 4) == ".lua") {
+        return run_test_script(first_arg);
+    }
+
+    // 推理模式：需要至少 3 个参数（script, model, input）
     if (argc < 4) {
         print_usage(argv[0]);
         return 1;

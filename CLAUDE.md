@@ -11,16 +11,16 @@ cmake ..
 make
 
 # Run Lua-based inference (recommended)
-./build/model_infer scripts/yolo11_tensor_detector.lua models/yolo11n.onnx images/zidane.jpg
+./build/lua_runner scripts/yolo11_tensor_detector.lua models/yolo11n.onnx images/zidane.jpg
 
 # Run pure C++ inference (for benchmarking, YOLOv5 only)
 ./build/cpp_infer models/yolov5n.onnx images/zidane.jpg
 
 # Run tensor API tests
-./build/test_tensor lua scripts/test_tensor_api.lua
+./build/lua_runner tests/run_all_tests.lua
 
 # Video inference with options
-./build/model_infer scripts/yolo11_detector.lua models/yolo11n.onnx video.mp4 show save=out.mp4 frames=100
+./build/lua_runner scripts/yolo11_detector.lua models/yolo11n.onnx video.mp4 show save=out.mp4 frames=100
 
 # Rebuild after changes
 cd build && make -j8
@@ -319,14 +319,14 @@ The `Image` class in `lua_cv.cpp` wraps `cv::Mat` and exposes methods to Lua.
 
 ```bash
 # Basic functionality test
-./build/model_infer scripts/test_tensor_api.lua
+./build/lua_runner tests/run_all_tests.lua
 
 # Benchmark against C++ baseline
 ./build/cpp_infer models/yolo11n.onnx images/zidane.jpg  # Should be ~180ms
-./build/model_infer scripts/yolo11_tensor_detector.lua models/yolo11n.onnx images/zidane.jpg  # Target: ~190ms
+./build/lua_runner scripts/yolo11_tensor_detector.lua models/yolo11n.onnx images/zidane.jpg  # Target: ~190ms
 
 # Memory leak detection (video mode)
-./build/model_infer scripts/yolo11_detector.lua models/yolo11n.onnx video.mp4 frames=1000
+./build/lua_runner scripts/yolo11_detector.lua models/yolo11n.onnx video.mp4 frames=1000
 # Check output for "Memory leak detected" warnings
 ```
 
@@ -357,9 +357,8 @@ The video inference mode tracks memory usage per frame. If memory grows >10KB/fr
 
 ```
 src/
-  ├── main.cpp              # Lua engine entry point
+  ├── main.cpp              # Unified Lua runner (inference + testing)
   ├── cpp_main.cpp          # Pure C++ benchmark entry
-  ├── test_main.cpp         # Tensor API test harness
   ├── modules/
   │   ├── lua_cv.*          # OpenCV bindings
   │   ├── lua_nn.*          # ONNX Runtime + Tensor typedef
@@ -385,8 +384,12 @@ src/
 
 scripts/
   ├── yolo11_*.lua          # YOLO11 variants (detector, pose, seg)
-  ├── yolov5_*.lua          # YOLOv5 scripts
-  └── test_tensor_api.lua   # Tensor operation tests
+  └── yolov5_*.lua          # YOLOv5 scripts
+
+tests/
+  ├── run_all_tests.lua     # Test runner
+  ├── test_helpers.lua      # Shared test utilities
+  └── test_*.lua            # Modular test suites (14 files)
 ```
 
 ## ONNX Runtime Notes

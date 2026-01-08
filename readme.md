@@ -53,16 +53,16 @@ The main engine uses Lua scripts to define the pipeline. Supports both **images*
 #### Image Inference
 ```bash
 # Syntax
-./model_infer <script_path> <model_path> <image_path> [options]
+./lua_runner <script_path> <model_path> <image_path> [options]
 
 # Basic usage
-./model_infer ../scripts/yolov5_detector.lua ../models/yolov5n.onnx ../images/zidane.jpg
+./lua_runner ../scripts/yolov5_detector.lua ../models/yolov5n.onnx ../images/zidane.jpg
 
 # With visualization window
-./model_infer ../scripts/yolov5_detector.lua ../models/yolov5n.onnx ../images/zidane.jpg show
+./lua_runner ../scripts/yolov5_detector.lua ../models/yolov5n.onnx ../images/zidane.jpg show
 
 # Save result to file
-./model_infer ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/zidane.jpg save=output.jpg
+./lua_runner ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/zidane.jpg save=output.jpg
 ```
 
 #### Video Inference
@@ -70,22 +70,22 @@ Automatically processes video files (.mp4, .avi, .mov, etc.) with real-time memo
 
 ```bash
 # Basic usage (process all frames)
-./model_infer ../scripts/yolo11_detector.lua ../models/yolo11n.onnx ../images/video.mp4
+./lua_runner ../scripts/yolo11_detector.lua ../models/yolo11n.onnx ../images/video.mp4
 
 # With real-time display
-./model_infer ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/video.mp4 show
+./lua_runner ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/video.mp4 show
 
 # Save output video
-./model_infer ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/video.mp4 save=output.mp4
+./lua_runner ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/video.mp4 save=output.mp4
 
 # Process only first 100 frames (for testing)
-./model_infer ../scripts/yolo11_detector.lua ../models/yolo11n.onnx ../images/video.mp4 frames=100
+./lua_runner ../scripts/yolo11_detector.lua ../models/yolo11n.onnx ../images/video.mp4 frames=100
 
 # Skip frames (process every 2nd frame for speed)
-./model_infer ../scripts/yolo11_detector.lua ../models/yolo11n.onnx ../images/video.mp4 skip=2
+./lua_runner ../scripts/yolo11_detector.lua ../models/yolo11n.onnx ../images/video.mp4 skip=2
 
 # Combine options
-./model_infer ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/video.mp4 show save=out.mp4 frames=200 skip=2
+./lua_runner ../scripts/yolo11_seg.lua ../models/yolo11n-seg.onnx ../images/video.mp4 show save=out.mp4 frames=200 skip=2
 ```
 
 **Video Features:**
@@ -185,10 +185,10 @@ Total Postprocess               ~4.5 ms
 **Profiling Commands:**
 ```bash
 # YOLOv5n detailed timing
-./model_infer scripts/yolov5_tensor_benchmark.lua models/yolov5n.onnx images/zidane.jpg
+./lua_runner scripts/yolov5_tensor_benchmark.lua models/yolov5n.onnx images/zidane.jpg
 
 # YOLO11n detailed timing
-./model_infer scripts/yolo11_tensor_benchmark.lua models/yolo11n.onnx images/zidane.jpg
+./lua_runner scripts/yolo11_tensor_benchmark.lua models/yolo11n.onnx images/zidane.jpg
 ```
 
 *Tested on Linux x64 AMD Ryzen 9 3900X 12-Core Processor.*
@@ -485,14 +485,14 @@ print(string.format("Found %d objects", #results))
 
 ```bash
 # Run your script
-./build/model_infer scripts/your_script.lua models/model.onnx images/test.jpg
+./build/lua_runner scripts/your_script.lua models/model.onnx images/test.jpg
 
 # Run all tests (new modular approach)
-./build/test_tensor tests/run_all_tests.lua
+./build/lua_runner tests/run_all_tests.lua
 
 # Or run individual test modules
-./build/test_tensor tests/test_basic.lua
+./build/lua_runner tests/test_basic.lua
 
 # Benchmark performance
-time ./build/model_infer scripts/your_script.lua models/model.onnx images/test.jpg
+time ./build/lua_runner scripts/your_script.lua models/model.onnx images/test.jpg
 ```
