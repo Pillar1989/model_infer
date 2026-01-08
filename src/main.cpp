@@ -468,6 +468,10 @@ int main(int argc, char* argv[]) {
             auto end_time = std::chrono::high_resolution_clock::now();
             auto total_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
 
+            // 获取最终内存状态
+            mem_current.update();
+            if (mem_current.vm_rss_kb > mem_peak.vm_rss_kb) mem_peak = mem_current;
+
             std::cout << "\n\n" << std::string(70, '=') << "\n";
             std::cout << "=== Processing Complete ===\n";
             std::cout << "Processed: " << processed_count << " frames (total: " << frame_count << ")\n";
