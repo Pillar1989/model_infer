@@ -15,10 +15,19 @@ Model.config = {
     labels = coco_labels  -- 使用公共库中的COCO labels
 }
 
-function Model.preprocess(img)
-    -- 使用公共库的letterbox函数
-    return preprocess_lib.letterbox(img, Model.config.input_size, Model.config.stride)
-end
+-- C++ Preprocess Configuration (使用C++预处理函数)
+Model.preprocess_config = {
+    type = "letterbox",
+    input_size = {640, 640},
+    stride = 32,
+    fill_value = 114
+}
+
+-- Lua fallback implementation (仅在C++预处理不可用时使用)
+-- function Model.preprocess(img)
+--     -- 使用公共库的letterbox函数
+--     return preprocess_lib.letterbox(img, Model.config.input_size, Model.config.stride)
+-- end
 
 -- 使用纯Tensor API实现YOLOv5后处理
 function Model.postprocess(outputs, meta)
