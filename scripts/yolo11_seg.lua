@@ -3,6 +3,8 @@
 -- local nn = require "lua_nn"
 local utils = lua_utils
 local nn = lua_nn
+local preprocess_lib = require("scripts.lib.preprocess")
+local coco_labels = require("scripts.lib.coco")
 
 local Model = {}
 
@@ -11,50 +13,16 @@ Model.config = {
     conf_thres = 0.25,
     iou_thres  = 0.45,
     stride     = 32,
-    labels = {
-        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-        "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow"
-        -- ... (full COCO labels)
-    }
+    labels = coco_labels  -- 使用公共库中的COCO labels
 }
 
 function Model.preprocess(img)
-    local w, h = img.width, img.height
-    local target_h, target_w = table.unpack(Model.config.input_size)
+    -- 使用公共库的letterbox函数
+    local input_tensor, meta = preprocess_lib.letterbox(img, Model.config.input_size, Model.config.stride)
 
-    local r = math.min(target_h / h, target_w / w)
-    local new_w = math.floor(w * r)
-    local new_h = math.floor(h * r)
-
-    if new_w ~= w or new_h ~= h then
-        img:resize(new_w, new_h)
-    end
-
-    local dw = target_w - new_w
-    local dh = target_h - new_h
-    
-    dw = dw % Model.config.stride
-    dh = dh % Model.config.stride
-
-    local top = math.floor(dh / 2)
-    local bottom = dh - top
-    local left = math.floor(dw / 2)
-    local right = dw - left
-
-    img:pad(top, bottom, left, right, 114)
-
-    local scale = 1.0 / 255.0
-    local input_tensor = img:to_tensor(scale, {0,0,0}, {1,1,1})
-
-    local meta = {
-        scale = r,
-        pad_x = left,
-        pad_y = top,
-        ori_w = w,
-        ori_h = h,
-        input_w = img.width,
-        input_h = img.height
-    }
+    -- 添加seg脚本需要的额外meta字段
+    meta.input_w = img.width
+    meta.input_h = img.height
 
     return input_tensor, meta
 end
@@ -72,11 +40,10 @@ function Model.postprocess(outputs, meta)
     local proposals = {}
 
     for _, box in ipairs(raw_boxes) do
-        -- Restore Box
-        local x = (box.x - meta.pad_x) / meta.scale
-        local y = (box.y - meta.pad_y) / meta.scale
-        local w = box.w / meta.scale
-        local h = box.h / meta.scale
+        -- Restore Box (使用公共库函数)
+        local x, y = preprocess_lib.scale_coords(box.x, box.y, meta)
+        local w = preprocess_lib.scale_size(box.w, meta)
+        local h = preprocess_lib.scale_size(box.h, meta)
         
         table.insert(proposals, {
             x = x, y = y, w = w, h = h,

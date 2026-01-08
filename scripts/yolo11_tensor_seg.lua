@@ -2,6 +2,8 @@
 -- 展示如何用通用Tensor操作处理分割任务
 local utils = lua_utils
 local nn = lua_nn
+local preprocess_lib = require("scripts.lib.preprocess")
+local coco_labels = require("scripts.lib.coco")
 
 local Model = {}
 
@@ -10,56 +12,16 @@ Model.config = {
     conf_thres = 0.25,
     iou_thres  = 0.45,
     stride     = 32,
-    labels = {
-        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-        "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-        "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-        "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-        "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-        "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-        "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-        "hair drier", "toothbrush"
-    }
+    labels = coco_labels  -- 使用公共库中的COCO labels
 }
 
 function Model.preprocess(img)
-    local w, h = img.width, img.height
-    local target_h, target_w = table.unpack(Model.config.input_size)
+    -- 使用公共库的letterbox函数
+    local input_tensor, meta = preprocess_lib.letterbox(img, Model.config.input_size, Model.config.stride)
 
-    local r = math.min(target_h / h, target_w / w)
-    local new_w = math.floor(w * r)
-    local new_h = math.floor(h * r)
-
-    if new_w ~= w or new_h ~= h then
-        img:resize(new_w, new_h)
-    end
-
-    local dw = target_w - new_w
-    local dh = target_h - new_h
-    
-    dw = dw % Model.config.stride
-    dh = dh % Model.config.stride
-
-    local top = math.floor(dh / 2)
-    local bottom = dh - top
-    local left = math.floor(dw / 2)
-    local right = dw - left
-
-    img:pad(top, bottom, left, right, 114)
-
-    local scale = 1.0 / 255.0
-    local input_tensor = img:to_tensor(scale, {0,0,0}, {1,1,1})
-
-    local meta = {
-        scale = r,
-        pad_x = left,
-        pad_y = top,
-        ori_w = w,
-        ori_h = h,
-        input_w = img.width,
-        input_h = img.height
-    }
+    -- 添加seg脚本需要的额外meta字段
+    meta.input_w = img.width
+    meta.input_h = img.height
 
     return input_tensor, meta
 end
@@ -133,12 +95,11 @@ function Model.postprocess(outputs, meta)
         })
     end
     
-    -- 4. 坐标还原
+    -- 4. 坐标还原（使用公共库函数）
     for _, box in ipairs(proposals) do
-        box.x = (box.x - meta.pad_x) / meta.scale
-        box.y = (box.y - meta.pad_y) / meta.scale
-        box.w = box.w / meta.scale
-        box.h = box.h / meta.scale
+        box.x, box.y = preprocess_lib.scale_coords(box.x, box.y, meta)
+        box.w = preprocess_lib.scale_size(box.w, meta)
+        box.h = preprocess_lib.scale_size(box.h, meta)
     end
     
     -- 5. NMS

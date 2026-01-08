@@ -3,6 +3,9 @@
 
 local utils = lua_utils
 local nn = lua_nn
+local preprocess_lib = require("scripts.lib.preprocess")
+local coco_labels = require("scripts.lib.coco")
+local benchmark = require("scripts.lib.benchmark")
 
 local Model = {}
 
@@ -11,17 +14,7 @@ Model.config = {
     conf_thres = 0.25,
     iou_thres  = 0.45,
     stride     = 32,
-    labels = {
-        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-        "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-        "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-        "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-        "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-        "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-        "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-        "hair drier", "toothbrush"
-    }
+    labels = coco_labels  -- 使用公共库中的COCO labels
 }
 
 -- Timing accumulators
@@ -168,12 +161,11 @@ function Model.postprocess(outputs, meta)
         })
     end
 
-    -- Coordinate transform to original image
+    -- Coordinate transform to original image (使用公共库函数)
     for _, box in ipairs(proposals) do
-        box.x = (box.x - meta.pad_x) / meta.scale
-        box.y = (box.y - meta.pad_y) / meta.scale
-        box.w = box.w / meta.scale
-        box.h = box.h / meta.scale
+        box.x, box.y = preprocess_lib.scale_coords(box.x, box.y, meta)
+        box.w = preprocess_lib.scale_size(box.w, meta)
+        box.h = preprocess_lib.scale_size(box.h, meta)
     end
     local t10 = os.clock()
     table.insert(Model.timings.loop_times, (t10 - t9) * 1000)
@@ -195,57 +187,25 @@ end
 
 -- Print timing summary
 function Model.print_timing_summary()
-    local function avg(t)
-        if #t == 0 then return 0 end
-        local sum = 0
-        for _, v in ipairs(t) do
-            sum = sum + v
-        end
-        return sum / #t
-    end
-
-    local n = #Model.timings.slice_contiguous_times
-    if n == 0 then return end
-
-    print("\n" .. string.rep("=", 70))
-    print("DETAILED TIMING BREAKDOWN (YOLO11 - Average over " .. n .. " runs)")
-    print(string.rep("=", 70))
-
-    print("\nPREPROCESS (Lua → C++ calls):")
-    print(string.format("  %-35s: %8.3f ms", "letterbox (resize + pad)", avg(Model.timings.letterbox_times)))
-    print(string.format("  %-35s: %8.3f ms", "to_tensor (cvt+norm+blob)", avg(Model.timings.to_tensor_times)))
-
-    local total_preprocess = avg(Model.timings.letterbox_times) +
-                             avg(Model.timings.to_tensor_times)
-    print(string.format("  %-35s: %8.3f ms", "TOTAL PREPROCESS", total_preprocess))
-
-    print("\nPOSTPROCESS (Lua + Tensor API):")
-    print(string.format("  %-35s: %8.3f ms", "slice + contiguous", avg(Model.timings.slice_contiguous_times)))
-    print(string.format("  %-35s: %8.3f ms", "max_with_argmax (fused)", avg(Model.timings.maxarg_times)))
-    print(string.format("  %-35s: %8.3f ms", "where_indices", avg(Model.timings.where_times)))
-    print(string.format("  %-35s: %8.3f ms", "extract_columns + index_select", avg(Model.timings.extract_times)))
-    print(string.format("  %-35s: %8.3f ms", "build proposals (Lua loop)", avg(Model.timings.loop_times)))
-    print(string.format("  %-35s: %8.3f ms", "NMS", avg(Model.timings.nms_times)))
-    print(string.rep("-", 70))
-
-    local total_postprocess = avg(Model.timings.slice_contiguous_times) +
-                              avg(Model.timings.maxarg_times) +
-                              avg(Model.timings.where_times) +
-                              avg(Model.timings.extract_times) +
-                              avg(Model.timings.loop_times) +
-                              avg(Model.timings.nms_times)
-
-    print(string.format("  %-35s: %8.3f ms", "TOTAL POSTPROCESS", total_postprocess))
-
-    print("\nOVERALL:")
-    print(string.format("  %-35s: %8.3f ms", "Preprocess (Lua→C++)", total_preprocess))
-    print(string.format("  %-35s: %8.3f ms", "Postprocess (Lua+Tensor)", total_postprocess))
-    print(string.format("  %-35s: %8.3f ms", "TOTAL Lua Overhead", total_preprocess + total_postprocess))
-
-    print(string.rep("=", 70))
-    print("\nNOTE: Image Load and ONNX Inference times are shown by main.cpp")
-    print("      YOLO11 uses transpose-free slice operations for better performance")
-    print(string.rep("=", 70) .. "\n")
+    local config = {
+        count_key = "slice_contiguous_times",
+        preprocess_items = {
+            {"letterbox (resize + pad)", "letterbox_times"},
+            {"to_tensor (cvt+norm+blob)", "to_tensor_times"}
+        },
+        postprocess_items = {
+            {"slice + contiguous", "slice_contiguous_times"},
+            {"max_with_argmax (fused)", "maxarg_times"},
+            {"where_indices", "where_times"},
+            {"extract_columns + index_select", "extract_times"},
+            {"build proposals (Lua loop)", "loop_times"},
+            {"NMS", "nms_times"}
+        },
+        notes = {
+            "YOLO11 uses transpose-free slice operations for better performance"
+        }
+    }
+    benchmark.print_timing_summary("YOLO11", Model.timings, config)
 end
 
 return Model

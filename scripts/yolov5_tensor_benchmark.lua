@@ -3,6 +3,9 @@
 
 local utils = lua_utils
 local nn = lua_nn
+local preprocess_lib = require("scripts.lib.preprocess")
+local coco_labels = require("scripts.lib.coco")
+local benchmark = require("scripts.lib.benchmark")
 
 local Model = {}
 
@@ -10,17 +13,7 @@ Model.config = {
     input_size = {640, 640},
     conf_thres = 0.25,
     iou_thres  = 0.45,
-    labels = {
-        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-        "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-        "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-        "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-        "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-        "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-        "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-        "hair drier", "toothbrush"
-    }
+    labels = coco_labels  -- 使用公共库中的COCO labels
 }
 
 -- Timing accumulators
@@ -74,8 +67,10 @@ function Model.preprocess(img)
 
     local meta = {
         scale = r,
-        pad = {top, left},
-        orig_shape = {w, h}
+        pad_x = left,
+        pad_y = top,
+        ori_w = w,
+        ori_h = h
     }
 
     return input_tensor, meta
@@ -110,8 +105,6 @@ function Model.postprocess(outputs, meta)
     local t5 = os.clock()
     local proposals = {}
     local num_boxes = 25200
-    local scale = meta.scale
-    local pad_top, pad_left = table.unpack(meta.pad)
 
     for i = 0, num_boxes - 1 do
         local obj = objectness:get(i)
@@ -126,11 +119,12 @@ function Model.postprocess(outputs, meta)
                 local h = boxes_h:get(i)
                 local cls_id = class_ids[i + 1]
 
-                -- Convert center to top-left and scale back to original coordinates
-                local x = (cx - w / 2 - pad_left) / scale
-                local y = (cy - h / 2 - pad_top) / scale
-                local scaled_w = w / scale
-                local scaled_h = h / scale
+                -- Convert center to top-left and scale back to original coordinates (使用公共库函数)
+                local x = cx - w / 2
+                local y = cy - h / 2
+                x, y = preprocess_lib.scale_coords(x, y, meta)
+                local scaled_w = preprocess_lib.scale_size(w, meta)
+                local scaled_h = preprocess_lib.scale_size(h, meta)
 
                 table.insert(proposals, {
                     x = x,
@@ -174,54 +168,24 @@ end
 
 -- Print detailed timing summary
 function Model.print_timing_summary()
-    local function avg(t)
-        if #t == 0 then return 0 end
-        local sum = 0
-        for _, v in ipairs(t) do
-            sum = sum + v
-        end
-        return sum / #t
-    end
-
-    local n = #Model.timings.slice_times
-    if n == 0 then return end
-
-    print("\n" .. string.rep("=", 70))
-    print("DETAILED TIMING BREAKDOWN (YOLOv5 - Average over " .. n .. " runs)")
-    print(string.rep("=", 70))
-
-    print("\nPREPROCESS (Lua → C++ calls):")
-    print(string.format("  %-35s: %8.3f ms", "letterbox (resize + pad)", avg(Model.timings.letterbox_times)))
-    print(string.format("  %-35s: %8.3f ms", "to_tensor (cvt+norm+blob)", avg(Model.timings.cvtcolor_times)))
-
-    local total_preprocess = avg(Model.timings.letterbox_times) +
-                             avg(Model.timings.cvtcolor_times)
-    print(string.format("  %-35s: %8.3f ms", "TOTAL PREPROCESS", total_preprocess))
-
-    print("\nPOSTPROCESS (Lua + Tensor API):")
-    print(string.format("  %-35s: %8.3f ms", "get_column + slice_columns", avg(Model.timings.slice_times)))
-    print(string.format("  %-35s: %8.3f ms", "max_with_argmax (fused)", avg(Model.timings.maxarg_times)))
-    print(string.format("  %-35s: %8.3f ms", "filter + build proposals (Lua)", avg(Model.timings.where_times) + avg(Model.timings.extract_times) + avg(Model.timings.loop_times)))
-    print(string.format("  %-35s: %8.3f ms", "NMS", avg(Model.timings.nms_times)))
-
-    local total_postprocess = avg(Model.timings.slice_times) +
-                              avg(Model.timings.maxarg_times) +
-                              avg(Model.timings.where_times) +
-                              avg(Model.timings.extract_times) +
-                              avg(Model.timings.loop_times) +
-                              avg(Model.timings.nms_times)
-    print(string.format("  %-35s: %8.3f ms", "TOTAL POSTPROCESS", total_postprocess))
-
-    print("\nOVERALL:")
-    print(string.format("  %-35s: %8.3f ms", "Preprocess (Lua→C++)", total_preprocess))
-    print(string.format("  %-35s: %8.3f ms", "Postprocess (Lua+Tensor)", total_postprocess))
-    print(string.format("  %-35s: %8.3f ms", "TOTAL Lua Overhead", total_preprocess + total_postprocess))
-
-    print(string.rep("=", 70))
-    print("\nNOTE: Image Load and ONNX Inference times are shown by main.cpp")
-    print("      Compare with cpp_infer baseline (pure C++ YOLOv5)")
-    print("      to_tensor combines cvtColor + normalization + blob creation")
-    print(string.rep("=", 70) .. "\n")
+    local config = {
+        count_key = "slice_times",
+        preprocess_items = {
+            {"letterbox (resize + pad)", "letterbox_times"},
+            {"to_tensor (cvt+norm+blob)", "cvtcolor_times"}
+        },
+        postprocess_items = {
+            {"get_column + slice_columns", "slice_times"},
+            {"max_with_argmax (fused)", "maxarg_times"},
+            {"filter + build proposals (Lua)", {"where_times", "extract_times", "loop_times"}},
+            {"NMS", "nms_times"}
+        },
+        notes = {
+            "Compare with cpp_infer baseline (pure C++ YOLOv5)",
+            "to_tensor combines cvtColor + normalization + blob creation"
+        }
+    }
+    benchmark.print_timing_summary("YOLOv5", Model.timings, config)
 end
 
 return Model

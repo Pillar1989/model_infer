@@ -2,6 +2,7 @@
 -- 展示如何用通用Tensor操作处理姿态估计
 local utils = lua_utils
 local nn = lua_nn
+local preprocess_lib = require("scripts.lib.preprocess")
 
 local Model = {}
 
@@ -26,42 +27,8 @@ Model.config = {
 }
 
 function Model.preprocess(img)
-    local w, h = img.width, img.height
-    local target_h, target_w = table.unpack(Model.config.input_size)
-
-    local r = math.min(target_h / h, target_w / w)
-    local new_w = math.floor(w * r)
-    local new_h = math.floor(h * r)
-
-    if new_w ~= w or new_h ~= h then
-        img:resize(new_w, new_h)
-    end
-
-    local dw = target_w - new_w
-    local dh = target_h - new_h
-    
-    dw = dw % Model.config.stride
-    dh = dh % Model.config.stride
-
-    local top = math.floor(dh / 2)
-    local bottom = dh - top
-    local left = math.floor(dw / 2)
-    local right = dw - left
-
-    img:pad(top, bottom, left, right, 114)
-
-    local scale = 1.0 / 255.0
-    local input_tensor = img:to_tensor(scale, {0,0,0}, {1,1,1})
-
-    local meta = {
-        scale = r,
-        pad_x = left,
-        pad_y = top,
-        ori_w = w,
-        ori_h = h
-    }
-
-    return input_tensor, meta
+    -- 使用公共库的letterbox函数
+    return preprocess_lib.letterbox(img, Model.config.input_size, Model.config.stride)
 end
 
 -- 使用向量化Tensor操作实现姿态估计后处理（方案3 - 极致性能）
@@ -137,17 +104,15 @@ function Model.postprocess(outputs, meta)
         })
     end
     
-    -- 3. 坐标还原(包括关键点)
+    -- 3. 坐标还原(包括关键点，使用公共库函数)
     for _, box in ipairs(proposals) do
-        box.x = (box.x - meta.pad_x) / meta.scale
-        box.y = (box.y - meta.pad_y) / meta.scale
-        box.w = box.w / meta.scale
-        box.h = box.h / meta.scale
-        
+        box.x, box.y = preprocess_lib.scale_coords(box.x, box.y, meta)
+        box.w = preprocess_lib.scale_size(box.w, meta)
+        box.h = preprocess_lib.scale_size(box.h, meta)
+
         -- 还原关键点坐标
         for _, kpt in ipairs(box.keypoints) do
-            kpt.x = (kpt.x - meta.pad_x) / meta.scale
-            kpt.y = (kpt.y - meta.pad_y) / meta.scale
+            kpt.x, kpt.y = preprocess_lib.scale_coords(kpt.x, kpt.y, meta)
         end
     end
     
