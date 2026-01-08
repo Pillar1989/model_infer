@@ -5,8 +5,8 @@
 #include <memory>
 #include <string>
 
-#include "onnxruntime_cxx_api.h"
 #include "LuaIntf.h"
+#include "inference/inference.h"
 
 // 使用 tensor 模块的 Tensor 类
 #include "tensor/tensor.h"
@@ -18,26 +18,19 @@ using Tensor = tensor::Tensor;
 
 class Session {
 public:
-    explicit Session(const std::string& model_path);
+    explicit Session(const std::string& model_path, int num_threads = 4);
 
     // 推理方法（接受Tensor对象）
     LuaIntf::LuaRef run(lua_State* L, const Tensor& input_tensor);
 
     // 属性访问
-    std::vector<std::string> input_names() const { return input_names_; }
-    std::vector<std::string> output_names() const { return output_names_; }
-    std::vector<ONNXTensorElementDataType> input_types() const { return input_types_; }
-    std::vector<std::vector<int64_t>> input_shapes() const { return input_shapes_; }
+    std::vector<std::string> input_names() const;
+    std::vector<std::string> output_names() const;
+    std::vector<int64_t> input_shape(size_t index = 0) const;
+    std::vector<int64_t> output_shape(size_t index = 0) const;
 
 private:
-    std::shared_ptr<Ort::Env> env_;        // shared_ptr自动管理
-    std::shared_ptr<Ort::Session> session_;
-    Ort::MemoryInfo memory_info_;
-
-    std::vector<std::string> input_names_;
-    std::vector<std::string> output_names_;
-    std::vector<ONNXTensorElementDataType> input_types_;
-    std::vector<std::vector<int64_t>> input_shapes_;
+    std::unique_ptr<inference::OnnxSession> session_;
 };
 
 // 注册到Lua
