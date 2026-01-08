@@ -7,7 +7,7 @@ local Model = {}
 -- 1. Model Configuration
 -- ==========================================================
 Model.config = {
-    input_size = {224, 224}, 
+    input_size = {224, 224},
     topk = 5,
     labels = {
         [559] = "flute",      -- 558
@@ -17,6 +17,12 @@ Model.config = {
         [684] = "oboe",       -- 683
         [907] = "Windsor_tie" -- 906
     }
+}
+
+-- C++ Preprocess Configuration (使用C++预处理函数)
+Model.preprocess_config = {
+    type = "resize_center_crop",
+    size = 224
 }
 
 -- Load labels
