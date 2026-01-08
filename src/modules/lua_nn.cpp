@@ -1,175 +1,57 @@
 /**
  * lua_nn.cpp - ONNX Runtime Session 绑定和 Lua 模块注册
  *
- * 这个文件仅包含:
- * - Session 类实现 (ONNX Runtime 推理)
- * - register_module() 函数 (Lua 绑定)
- *
- * Tensor 类已迁移到 tensor/tensor.h 和 tensor/tensor.cpp
+ * 现在使用 inference::OnnxSession 作为底层推理引擎
  */
 
 #include "lua_nn.h"
-#include <algorithm>
-#include <cstring>
 
 namespace lua_nn {
 
 // ========== Session 实现 ==========
 
-Session::Session(const std::string& model_path)
-    : env_(std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "model_infer")),
-      memory_info_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)) {
-
-    // 会话选项
-    Ort::SessionOptions session_options;
-    session_options.SetIntraOpNumThreads(4);
-    session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-    // 创建会话
-    session_ = std::make_unique<Ort::Session>(*env_, model_path.c_str(), session_options);
-
-    // 获取输入输出名称
-    Ort::AllocatorWithDefaultOptions allocator;
-    size_t num_inputs = session_->GetInputCount();
-    for (size_t i = 0; i < num_inputs; ++i) {
-        auto input_name = session_->GetInputNameAllocated(i, allocator);
-        input_names_.push_back(input_name.get());
-
-        auto type_info = session_->GetInputTypeInfo(i);
-        auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
-        input_types_.push_back(tensor_info.GetElementType());
-        input_shapes_.push_back(tensor_info.GetShape());
-    }
-
-    size_t num_outputs = session_->GetOutputCount();
-    for (size_t i = 0; i < num_outputs; ++i) {
-        auto output_name = session_->GetOutputNameAllocated(i, allocator);
-        output_names_.push_back(output_name.get());
-    }
+Session::Session(const std::string& model_path, int num_threads)
+    : session_(std::make_unique<inference::OnnxSession>(model_path, num_threads)) {
 }
 
 LuaIntf::LuaRef Session::run(lua_State* L, const Tensor& input_tensor) {
-    // 创建ONNX Runtime输入Tensor
+    // 获取输入数据和形状
     auto shape = input_tensor.shape();
-    std::vector<Ort::Value> input_tensors;
+    const float* input_data = input_tensor.raw_data();
 
-    // Check expected type (assuming single input or first input matches)
-    ONNXTensorElementDataType target_type = input_types_.empty() ? ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT : input_types_[0];
+    // 调用底层推理引擎
+    auto [output_data, output_shape] = session_->run(input_data, shape);
 
-    // Check expected shape and pad if necessary
-    std::vector<float> padded_data;
-    const float* input_data_ptr = input_tensor.raw_data();
-    size_t input_data_size = static_cast<size_t>(input_tensor.size());
+    // 创建输出 Tensor
+    Tensor output_tensor(std::move(output_data), output_shape);
 
-    if (!input_shapes_.empty() && input_shapes_[0].size() == 4) {
-        int64_t model_h = input_shapes_[0][2];
-        int64_t model_w = input_shapes_[0][3];
-
-        if (model_h > 0 && model_w > 0 && shape.size() == 4) {
-            int64_t input_h = shape[2];
-            int64_t input_w = shape[3];
-
-            if (input_h < model_h || input_w < model_w) {
-                // Need padding
-                // Assuming NCHW layout
-                int64_t N = shape[0];
-                int64_t C = shape[1];
-
-                // New shape
-                shape[2] = model_h;
-                shape[3] = model_w;
-
-                size_t new_size = static_cast<size_t>(N * C * model_h * model_w);
-                padded_data.resize(new_size, 114.0f/255.0f); // Pad with gray
-
-                // Copy data
-                for (int64_t n = 0; n < N; ++n) {
-                    for (int64_t c = 0; c < C; ++c) {
-                        const float* src_ptr = input_data_ptr + (n * C + c) * input_h * input_w;
-                        float* dst_ptr = padded_data.data() + (n * C + c) * model_h * model_w;
-
-                        for (int64_t h = 0; h < input_h; ++h) {
-                            std::copy(src_ptr + h * input_w, src_ptr + h * input_w + input_w, dst_ptr + h * model_w);
-                        }
-                    }
-                }
-
-                // Update pointer and size
-                input_data_ptr = padded_data.data();
-                input_data_size = padded_data.size();
-            }
-        }
-    }
-
-    // Keep data alive during Run
-    std::vector<Ort::Float16_t> fp16_data;
-
-    if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-        size_t num_elements = input_data_size;
-        const float* float_data = input_data_ptr;
-        fp16_data.reserve(num_elements);
-
-        for (size_t i = 0; i < num_elements; ++i) {
-            fp16_data.emplace_back(float_data[i]);
-        }
-
-        input_tensors.push_back(Ort::Value::CreateTensor<Ort::Float16_t>(
-            memory_info_,
-            fp16_data.data(),
-            fp16_data.size(),
-            shape.data(),
-            shape.size()
-        ));
-    } else {
-        input_tensors.push_back(Ort::Value::CreateTensor<float>(
-            memory_info_,
-            const_cast<float*>(input_data_ptr),
-            input_data_size,
-            shape.data(),
-            shape.size()
-        ));
-    }
-
-    // 执行推理
-    std::vector<const char*> input_names_cstr, output_names_cstr;
-    for (const auto& name : input_names_) input_names_cstr.push_back(name.c_str());
-    for (const auto& name : output_names_) output_names_cstr.push_back(name.c_str());
-
-    auto output_tensors = session_->Run(
-        Ort::RunOptions{nullptr},
-        input_names_cstr.data(), input_tensors.data(), input_tensors.size(),
-        output_names_cstr.data(), output_names_cstr.size()
-    );
-
-    // 将输出转换为Lua table
+    // 返回 Lua table（为了向后兼容，仍然用 table 包装）
     LuaIntf::LuaRef outputs = LuaIntf::LuaRef::createTable(L);
+    const auto& output_names = session_->get_output_names();
 
-    for (size_t i = 0; i < output_tensors.size(); ++i) {
-        auto& ort_tensor = output_tensors[i];
-        auto tensor_info = ort_tensor.GetTensorTypeAndShapeInfo();
-        auto out_shape = tensor_info.GetShape();
-
-        // 复制数据到shared_ptr管理的vector
-        ONNXTensorElementDataType output_type = tensor_info.GetElementType();
-        size_t element_count = tensor_info.GetElementCount();
-
-        std::vector<float> result_vec;
-        if (output_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-             const Ort::Float16_t* ort_data = ort_tensor.GetTensorData<Ort::Float16_t>();
-             result_vec.reserve(element_count);
-             for(size_t k=0; k<element_count; ++k) {
-                 result_vec.push_back(ort_data[k].ToFloat());
-             }
-        } else {
-             const float* ort_data = ort_tensor.GetTensorData<float>();
-             result_vec.assign(ort_data, ort_data + element_count);
-        }
-
-        Tensor tensor(std::move(result_vec), out_shape);
-        outputs[output_names_[i]] = tensor;
+    if (!output_names.empty()) {
+        outputs[output_names[0]] = output_tensor;
+    } else {
+        outputs["output"] = output_tensor;
     }
 
     return outputs;
+}
+
+std::vector<std::string> Session::input_names() const {
+    return session_->get_input_names();
+}
+
+std::vector<std::string> Session::output_names() const {
+    return session_->get_output_names();
+}
+
+std::vector<int64_t> Session::input_shape(size_t index) const {
+    return session_->get_input_shape(index);
+}
+
+std::vector<int64_t> Session::output_shape(size_t index) const {
+    return session_->get_output_shape(index);
 }
 
 // ========== Lua 模块注册 ==========
