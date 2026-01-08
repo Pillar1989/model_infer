@@ -193,29 +193,11 @@ Total Postprocess               ~4.5 ms
 
 *Tested on Linux x64 AMD Ryzen 9 3900X 12-Core Processor.*
 
-## �📂 Project Structure
-
-- `src/`: C++ source code.
-  - `modules/`: Lua bindings for CV and NN operations.
-  - `bindings/`: Module registration and Lua context setup.
-  - `main.cpp`: Lua engine entry point.
-  - `cpp_main.cpp`: Pure C++ implementation.
-  - `test_main.cpp`: Tensor API test program.
-- `scripts/`: Lua scripts defining inference logic.
-  - `yolo11_tensor_*.lua`: YOLO11 inference scripts (detection, segmentation, pose).
-  - `yolo11_tensor_benchmark.lua`: YOLO11 with detailed timing profiling.
-  - `yolov5_tensor_*.lua`: YOLOv5 inference scripts.
-  - `yolov5_tensor_benchmark.lua`: YOLOv5 with detailed timing profiling.
-  - `test_tensor*.lua`: Tensor API test scripts.
-- `lua/`: Lua 5.5 source code (compiled as C++).
-- `lua-intf-ex/`: C++/Lua binding library (LuaIntf).
-- `onnxruntime-prebuilt/`: ONNX Runtime headers and libraries.
-- `models/`: ONNX model files.
-- `images/`: Test images.
 
 ## 📝 Writing High-Performance Lua Inference Scripts
 
-### Architecture Overview
+<details>
+<summary><strong>Architecture Overview</strong></summary>
 
 The inference pipeline consists of three stages:
 1. **Preprocessing** (C++ or Lua + OpenCV): Load and prepare image data
@@ -256,6 +238,13 @@ Model.preprocess_config = {
 **Available preprocessing types:**
 - `letterbox`: Resize with aspect ratio preservation + padding (for YOLO models)
 - `resize_center_crop`: Short edge resize + center crop (for classification)
+
+**⚠️ Important:** If you configure `preprocess_config`, your custom Lua `Model.preprocess` function will be bypassed. Remove or comment out the `preprocess_config` table if you need to use custom preprocessing logic.
+
+</details>
+
+<details>
+<summary><strong>Available Lua Modules</strong></summary>
 
 ### Available Lua Modules
 
@@ -369,6 +358,11 @@ local xywh_box = utils.xyxy2xywh(xyxy_box)
 local scaled_box = utils.scale_boxes(box, orig_shape, new_shape)
 ```
 
+</details>
+
+<details>
+<summary><strong>Performance Best Practices</strong></summary>
+
 ### Performance Best Practices
 
 #### ⚡ DO: Use Vectorized Filtering (BEST - Near C++ Speed!)
@@ -450,62 +444,10 @@ for i = 1, #valid_indices do  -- Lua loop only 50 times!
 end
 ```
 
-### Script Template
+</details>
 
-Here's a minimal template for writing inference scripts:
-
-```lua
-local cv = require "lua_cv"
-local nn = require "lua_nn"
-local utils = require "lua_utils"
-
--- Parse arguments
-if #arg < 2 then
-    print("Usage: script.lua <model_path> <image_path>")
-    os.exit(1)
-end
-local model_path = arg[1]
-local image_path = arg[2]
-
--- 1. Preprocessing
-local img = cv.Image.load(image_path)
-local orig_h, orig_w = img:height(), img:width()
-local input_img = img:letterbox(640, 640):cvt_color(cv.COLOR_BGR2RGB)
-local blob = input_img:to_blob()
-
--- 2. Inference
-local session = nn.InferenceSession.new(model_path)
-session:warm_up(3)
-local outputs = session:infer({blob})
-
--- 3. Postprocessing
-local output = outputs[1]:squeeze(0)  -- Remove batch dimension
-
--- Use tensor operations for high-performance processing
-local boxes = output:slice(1, 0, 4)
-local obj_scores = output:slice(1, 4, 5)
-local class_scores = output:slice(1, 5, output:size(1))
-
--- Apply confidence threshold
-local max_class_scores = class_scores:max(1)
-local class_ids = class_scores:argmax(1)
-local final_scores = obj_scores:mul(max_class_scores)
-
--- For demonstration, convert to table (in production, use filter_yolo)
-local results = {}
-local score_table = final_scores:to_table()
-for i, score in ipairs(score_table) do
-    if score > 0.25 then
-        table.insert(results, {
-            box = boxes:slice(0, i-1, i):to_table()[1],
-            score = score,
-            class_id = class_ids:to_table()[i]
-        })
-    end
-end
-
-print(string.format("Found %d objects", #results))
-```
+<details>
+<summary><strong>Example Scripts</strong></summary>
 
 ### Example Scripts
 
@@ -515,6 +457,11 @@ print(string.format("Found %d objects", #results))
 - **YOLO11 Pose**: [scripts/yolo11_tensor_pose.lua](scripts/yolo11_tensor_pose.lua) - 17 COCO keypoints
 - **YOLOv5 Detection**: [scripts/yolov5_tensor_detector.lua](scripts/yolov5_tensor_detector.lua) - Classic anchor-based detection
 - **YOLOv5 Benchmark**: [scripts/yolov5_tensor_benchmark.lua](scripts/yolov5_tensor_benchmark.lua) - Detailed timing profiling
+
+</details>
+
+<details>
+<summary><strong>Testing Your Script</strong></summary>
 
 ### Testing Your Script
 
@@ -531,3 +478,5 @@ print(string.format("Found %d objects", #results))
 # Benchmark performance
 time ./build/lua_runner scripts/your_script.lua models/model.onnx images/test.jpg
 ```
+
+</details>
