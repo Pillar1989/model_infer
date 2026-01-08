@@ -52,12 +52,14 @@ set_target_properties(onnxruntime PROPERTIES
 file(GLOB MODULE_SOURCES "src/modules/*.cpp")
 file(GLOB TENSOR_SOURCES "src/modules/tensor/*.cpp")
 file(GLOB BINDING_SOURCES "src/bindings/*.cpp")
+file(GLOB INFERENCE_SOURCES "src/inference/*.cpp")
 
 add_executable(lua_runner
     src/main.cpp
     ${MODULE_SOURCES}
     ${TENSOR_SOURCES}
     ${BINDING_SOURCES}
+    ${INFERENCE_SOURCES}
 )
 
 target_link_libraries(lua_runner PRIVATE
@@ -89,11 +91,23 @@ set_target_properties(lua_runner PROPERTIES
 )
 
 # ==========================================================
-# 5. Pure C++ Comparison App
+# 5. Pure C++ Inference App
 # ==========================================================
-add_executable(cpp_infer src/cpp_main.cpp)
-target_link_libraries(cpp_infer PRIVATE ${OpenCV_LIBS} onnxruntime)
-target_include_directories(cpp_infer PRIVATE ${OpenCV_INCLUDE_DIRS} ${ONNXRUNTIME_INCLUDE_DIRS})
+add_executable(cpp_infer
+    src/cpp_main.cpp
+    ${INFERENCE_SOURCES}
+)
+
+target_link_libraries(cpp_infer PRIVATE
+    ${OpenCV_LIBS}
+    onnxruntime
+)
+
+target_include_directories(cpp_infer PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    ${OpenCV_INCLUDE_DIRS}
+    ${ONNXRUNTIME_INCLUDE_DIRS}
+)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(cpp_infer PRIVATE dl)
