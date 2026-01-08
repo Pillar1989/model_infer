@@ -5,15 +5,13 @@
 #include <cmath>
 #include <algorithm>
 #include <numeric>
+#include <iomanip>
+#include <fstream>
+#include <sstream>
 #include <opencv2/opencv.hpp>
-#include "onnxruntime_cxx_api.h"
-// Try to include float16 header if available, otherwise rely on CXX API
-// Note: On some versions it is onnxruntime_float16.h
-#if __has_include("onnxruntime_float16.h")
-#include "onnxruntime_float16.h"
-#endif
+#include "inference/inference.h"
 
-// Configuration matches yolov5_detector.lua
+// Configuration
 const int INPUT_W = 640;
 const int INPUT_H = 640;
 const float CONF_THRES = 0.25f;
@@ -33,56 +31,179 @@ const std::vector<std::string> LABELS = {
     "hair drier", "toothbrush"
 };
 
+// ============ Memory Monitoring ============
+
+struct MemoryInfo {
+    size_t vm_rss_kb = 0;
+    size_t vm_size_kb = 0;
+
+    void update() {
+        std::ifstream status("/proc/self/status");
+        std::string line;
+        while (std::getline(status, line)) {
+            if (line.find("VmRSS:") == 0) {
+                sscanf(line.c_str(), "VmRSS: %zu", &vm_rss_kb);
+            } else if (line.find("VmSize:") == 0) {
+                sscanf(line.c_str(), "VmSize: %zu", &vm_size_kb);
+            }
+        }
+    }
+
+    std::string to_string() const {
+        std::ostringstream oss;
+        oss << "RSS=" << std::fixed << std::setprecision(1)
+            << (vm_rss_kb / 1024.0) << "MB, "
+            << "VM=" << (vm_size_kb / 1024.0) << "MB";
+        return oss.str();
+    }
+};
+
+// ============ Data Structures ============
+
 struct Detection {
     float x, y, w, h;
     float score;
     int class_id;
 };
 
-struct PreprocessResult {
-    cv::Mat img_resized;
-    std::vector<float> blob;
+struct PreprocessMeta {
     float scale;
-    int pad_w;
-    int pad_h;
-    int ori_w;
-    int ori_h;
+    int pad_x, pad_y;
+    int ori_w, ori_h;
 };
 
-// IoU Calculation
+// YOLO model configuration (auto-detected from output shape)
+struct YoloConfig {
+    int num_boxes;
+    int box_dim;
+    bool has_objectness;
+    bool transposed;  // [1, 85, 25200] vs [1, 25200, 85]
+
+    // Auto-detect YOLO version from output shape
+    // YOLOv5: [1, 25200, 85] with objectness
+    // YOLO11: [1, 84, 8400] without objectness (CHW format)
+    static YoloConfig detect(const std::vector<int64_t>& shape) {
+        YoloConfig cfg;
+        int64_t dim1 = shape[1];
+        int64_t dim2 = shape[2];
+
+        cfg.transposed = (dim1 < dim2 && dim2 > 100);
+        cfg.num_boxes = cfg.transposed ? dim2 : dim1;
+        cfg.box_dim = cfg.transposed ? dim1 : dim2;
+
+        // YOLOv5: 85 = 4(xywh) + 1(objectness) + 80(classes)
+        // YOLO11: 84 = 4(xywh) + 80(classes)
+        cfg.has_objectness = (cfg.box_dim == 85);
+
+        return cfg;
+    }
+
+    void print() const {
+        std::cout << "YOLO Config:\n";
+        std::cout << "  Format: " << (transposed ? "CHW [1, " + std::to_string(box_dim) + ", " + std::to_string(num_boxes) + "]"
+                                                  : "HWC [1, " + std::to_string(num_boxes) + ", " + std::to_string(box_dim) + "]") << "\n";
+        std::cout << "  Version: " << (has_objectness ? "YOLOv5" : "YOLO11") << "\n";
+        std::cout << "  Boxes: " << num_boxes << "\n";
+    }
+};
+
+// ============ Preprocessing (Optimized) ============
+
+PreprocessMeta letterbox_resize(const cv::Mat& img, cv::Mat& output,
+                                 int target_w, int target_h, int stride, uint8_t fill_value) {
+    int w = img.cols;
+    int h = img.rows;
+
+    float r = std::min((float)target_h / h, (float)target_w / w);
+    int new_w = std::floor(w * r);
+    int new_h = std::floor(h * r);
+
+    cv::Mat resized;
+    if (new_w != w || new_h != h) {
+        cv::resize(img, resized, cv::Size(new_w, new_h));
+    } else {
+        resized = img;  // No copy needed
+    }
+
+    int dw = target_w - new_w;
+    int dh = target_h - new_h;
+
+    // Note: No stride alignment needed when target size is fixed
+    // The target_w and target_h are already multiples of stride
+
+    int top = dh / 2;
+    int bottom = dh - top;
+    int left = dw / 2;
+    int right = dw - left;
+
+    cv::copyMakeBorder(resized, output, top, bottom, left, right,
+                      cv::BORDER_CONSTANT, cv::Scalar(fill_value, fill_value, fill_value));
+
+    return {r, left, top, w, h};
+}
+
+void hwc_to_chw_bgr2rgb(const cv::Mat& padded, std::vector<float>& blob, bool pre_allocated = false) {
+    const int H = padded.rows;
+    const int W = padded.cols;
+    const int HW = H * W;
+
+    // Only resize if not pre-allocated (video mode uses pre-allocated buffers)
+    if (!pre_allocated) {
+        blob.resize(3 * HW);
+    }
+
+    const uint8_t* src = padded.data;
+
+    // Optimized: direct pointer access + BGR→RGB conversion
+    // Use multiplication instead of division (3-5x faster on embedded systems)
+    constexpr float scale = 1.0f / 255.0f;
+
+    for (int i = 0; i < H; ++i) {
+        const uint8_t* row = src + i * W * 3;
+        for (int j = 0; j < W; ++j) {
+            const int idx = i * W + j;
+            // BGR → RGB: swap channels 0 and 2
+            blob[2 * HW + idx] = row[j * 3 + 0] * scale;  // B → R
+            blob[1 * HW + idx] = row[j * 3 + 1] * scale;  // G → G
+            blob[0 * HW + idx] = row[j * 3 + 2] * scale;  // R → B
+        }
+    }
+}
+
+// ============ Postprocessing ============
+
 float compute_iou(const Detection& a, const Detection& b) {
     float a_x1 = a.x, a_y1 = a.y, a_x2 = a.x + a.w, a_y2 = a.y + a.h;
     float b_x1 = b.x, b_y1 = b.y, b_x2 = b.x + b.w, b_y2 = b.y + b.h;
-    
+
     float inter_x1 = std::max(a_x1, b_x1);
     float inter_y1 = std::max(a_y1, b_y1);
     float inter_x2 = std::min(a_x2, b_x2);
     float inter_y2 = std::min(a_y2, b_y2);
-    
+
     float inter_w = std::max(0.0f, inter_x2 - inter_x1);
     float inter_h = std::max(0.0f, inter_y2 - inter_y1);
     float inter_area = inter_w * inter_h;
-    
+
     float a_area = a.w * a.h;
     float b_area = b.w * b.h;
     float union_area = a_area + b_area - inter_area;
-    
+
     return union_area > 0 ? inter_area / union_area : 0.0f;
 }
 
-// NMS
 std::vector<Detection> nms(std::vector<Detection>& boxes, float iou_thres) {
     std::sort(boxes.begin(), boxes.end(), [](const Detection& a, const Detection& b) {
         return a.score > b.score;
     });
-    
+
     std::vector<bool> suppressed(boxes.size(), false);
     std::vector<Detection> result;
-    
+
     for (size_t i = 0; i < boxes.size(); ++i) {
         if (suppressed[i]) continue;
         result.push_back(boxes[i]);
-        
+
         for (size_t j = i + 1; j < boxes.size(); ++j) {
             if (suppressed[j]) continue;
             if (compute_iou(boxes[i], boxes[j]) > iou_thres) {
@@ -93,290 +214,376 @@ std::vector<Detection> nms(std::vector<Detection>& boxes, float iou_thres) {
     return result;
 }
 
-PreprocessResult preprocess(const std::string& image_path) {
-    cv::Mat img = cv::imread(image_path);
-    if (img.empty()) throw std::runtime_error("Failed to load image");
-    
-    // Convert BGR to RGB
-    cv::cvtColor(img, img, cv::COLOR_BGR2RGB);
-    
-    int w = img.cols;
-    int h = img.rows;
-    
-    float r = std::min((float)INPUT_H / h, (float)INPUT_W / w);
-    int new_w = std::floor(w * r);
-    int new_h = std::floor(h * r);
-    
-    cv::Mat resized;
-    if (new_w != w || new_h != h) {
-        cv::resize(img, resized, cv::Size(new_w, new_h));
-    } else {
-        resized = img.clone();
-    }
-    
-    int dw = INPUT_W - new_w;
-    int dh = INPUT_H - new_h;
-    
-    // Modulo stride
-    dw = dw % STRIDE;
-    dh = dh % STRIDE;
-    
-    int top = dh / 2;
-    int bottom = dh - top;
-    int left = dw / 2;
-    int right = dw - left;
-    
-    cv::Mat padded;
-    cv::copyMakeBorder(resized, padded, top, bottom, left, right, cv::BORDER_CONSTANT, cv::Scalar(114, 114, 114));
-    
-    // HWC -> CHW, Normalize
-    std::vector<float> blob(3 * padded.rows * padded.cols);
-    
-    // Manual conversion to match lua_cv logic (scale=1/255, mean=0, std=1)
-    // padded is CV_8UC3
-    int H = padded.rows;
-    int W = padded.cols;
-    for (int c = 0; c < 3; ++c) {
-        for (int i = 0; i < H; ++i) {
-            for (int j = 0; j < W; ++j) {
-                blob[c * H * W + i * W + j] = padded.at<cv::Vec3b>(i, j)[c] / 255.0f;
+void restore_coords(Detection& det, const PreprocessMeta& meta) {
+    det.x = (det.x - meta.pad_x) / meta.scale;
+    det.y = (det.y - meta.pad_y) / meta.scale;
+    det.w = det.w / meta.scale;
+    det.h = det.h / meta.scale;
+}
+
+// Generic YOLO postprocessing (supports both v5 and v11)
+std::vector<Detection> postprocess_yolo(
+    const float* output,
+    const YoloConfig& cfg,
+    const PreprocessMeta& meta,
+    float conf_thres,
+    float iou_thres
+) {
+    std::vector<Detection> proposals;
+    proposals.reserve(cfg.num_boxes / 20);
+
+    const int cls_start = cfg.has_objectness ? 5 : 4;
+    const int num_classes = cfg.box_dim - cls_start;
+
+    if (cfg.transposed) {
+        // CHW format: [1, 84/85, 8400/25200]
+        const float* cx_ptr = output + 0 * cfg.num_boxes;
+        const float* cy_ptr = output + 1 * cfg.num_boxes;
+        const float* w_ptr  = output + 2 * cfg.num_boxes;
+        const float* h_ptr  = output + 3 * cfg.num_boxes;
+        const float* obj_ptr = cfg.has_objectness ? (output + 4 * cfg.num_boxes) : nullptr;
+
+        for (int i = 0; i < cfg.num_boxes; ++i) {
+            float obj_conf = obj_ptr ? obj_ptr[i] : 1.0f;
+            if (obj_conf < conf_thres) continue;
+
+            // Find max class score
+            float max_cls_conf = 0;
+            int cls_id = 0;
+            for (int c = 0; c < num_classes; ++c) {
+                float conf = output[(cls_start + c) * cfg.num_boxes + i];
+                if (conf > max_cls_conf) {
+                    max_cls_conf = conf;
+                    cls_id = c;
+                }
             }
+
+            float final_score = obj_conf * max_cls_conf;
+            if (final_score < conf_thres) continue;
+
+            Detection det{
+                cx_ptr[i] - w_ptr[i] * 0.5f,
+                cy_ptr[i] - h_ptr[i] * 0.5f,
+                w_ptr[i], h_ptr[i],
+                final_score, cls_id
+            };
+            proposals.push_back(det);
+        }
+    } else {
+        // HWC format: [1, 8400/25200, 84/85]
+        for (int i = 0; i < cfg.num_boxes; ++i) {
+            const float* row = output + i * cfg.box_dim;
+
+            float obj_conf = cfg.has_objectness ? row[4] : 1.0f;
+            if (obj_conf < conf_thres) continue;
+
+            // Find max class score
+            float max_cls_conf = 0;
+            int cls_id = 0;
+            const float* cls_scores = row + cls_start;
+            for (int c = 0; c < num_classes; ++c) {
+                if (cls_scores[c] > max_cls_conf) {
+                    max_cls_conf = cls_scores[c];
+                    cls_id = c;
+                }
+            }
+
+            float final_score = obj_conf * max_cls_conf;
+            if (final_score < conf_thres) continue;
+
+            Detection det{
+                row[0] - row[2] * 0.5f,
+                row[1] - row[3] * 0.5f,
+                row[2], row[3],
+                final_score, cls_id
+            };
+            proposals.push_back(det);
         }
     }
-    
-    return {padded, blob, r, left, top, w, h};
+
+    // Perform NMS on letterbox coordinates
+    auto final_boxes = nms(proposals, iou_thres);
+
+    // Restore coordinates to original image space (only for final detections)
+    // This is more efficient than restoring all proposals (typically 100-500 boxes)
+    for (auto& det : final_boxes) {
+        restore_coords(det, meta);
+    }
+
+    return final_boxes;
 }
+
+// ============ Visualization ============
+
+void print_results(const std::vector<Detection>& results) {
+    std::cout << "\n=== Detection Results ===\n";
+    for (size_t i = 0; i < results.size(); ++i) {
+        const auto& det = results[i];
+        std::string label = (det.class_id >= 0 && det.class_id < LABELS.size())
+                          ? LABELS[det.class_id] : "unknown";
+        std::cout << "Box " << (i+1) << ": " << label << " "
+                  << "(" << det.x << ", " << det.y << ", " << det.w << ", " << det.h << ") "
+                  << "conf=" << det.score << "\n";
+    }
+    std::cout << "Total: " << results.size() << " detections\n";
+}
+
+void draw_detections(cv::Mat& frame, const std::vector<Detection>& detections) {
+    for (const auto& det : detections) {
+        cv::rectangle(frame, cv::Rect(det.x, det.y, det.w, det.h),
+                     cv::Scalar(0, 255, 0), 2);
+        std::string label = (det.class_id >= 0 && det.class_id < LABELS.size())
+                          ? LABELS[det.class_id] : "unknown";
+        std::string text = label + " " + std::to_string(det.score).substr(0, 4);
+        cv::putText(frame, text, cv::Point(det.x, det.y - 5),
+                   cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
+    }
+}
+
+// ============ Utilities ============
+
+bool is_video(const std::string& path) {
+    std::string ext = path.substr(path.find_last_of(".") + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return (ext == "mp4" || ext == "avi" || ext == "mov" || ext == "mkv");
+}
+
+void print_usage(const char* prog) {
+    std::cout << "Usage: " << prog << " <model.onnx> <input> [show] [save=output.mp4] [frames=N]\n";
+    std::cout << "\nInput: image (.jpg, .png) or video (.mp4, .avi)\n";
+    std::cout << "Options:\n";
+    std::cout << "  show         - Display results\n";
+    std::cout << "  save=FILE    - Save output video\n";
+    std::cout << "  frames=N     - Process first N frames only\n";
+    std::cout << "\nExamples:\n";
+    std::cout << "  " << prog << " yolo11n.onnx image.jpg show\n";
+    std::cout << "  " << prog << " yolov5n.onnx video.mp4 show save=out.mp4\n";
+}
+
+// ============ Main ============
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cout << "Usage: " << argv[0] << " <model.onnx> <image.jpg> [show]\n";
+        print_usage(argv[0]);
         return 1;
     }
-    
+
     std::string model_path = argv[1];
-    std::string image_path = argv[2];
-    bool show_result = (argc > 3 && std::string(argv[3]) == "show");
-    
+    std::string input_path = argv[2];
+
+    bool show_result = false;
+    std::string save_path = "";
+    int max_frames = -1;
+
+    // Parse options
+    for (int i = 3; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "show") {
+            show_result = true;
+        } else if (arg.find("save=") == 0) {
+            save_path = arg.substr(5);
+        } else if (arg.find("frames=") == 0) {
+            max_frames = std::stoi(arg.substr(7));
+        }
+    }
+
     try {
-        // 1. Preprocess
-        auto start_pre = std::chrono::high_resolution_clock::now();
-        PreprocessResult prep = preprocess(image_path);
-        auto end_pre = std::chrono::high_resolution_clock::now();
-        
-        // 2. Inference
-        auto start_infer = std::chrono::high_resolution_clock::now();
-        
-        Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "cpp_infer");
-        Ort::SessionOptions session_options;
-        session_options.SetIntraOpNumThreads(4);
-        session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        
-        Ort::Session session(env, model_path.c_str(), session_options);
-        
-        Ort::AllocatorWithDefaultOptions allocator;
-        
-        // Input info
-        size_t num_input_nodes = session.GetInputCount();
-        std::vector<const char*> input_node_names;
-        std::vector<std::string> input_node_names_alloc;
-        for(size_t i = 0; i < num_input_nodes; i++){
-            auto input_name = session.GetInputNameAllocated(i, allocator);
-            input_node_names_alloc.push_back(input_name.get());
-            input_node_names.push_back(input_node_names_alloc.back().c_str());
-        }
-        
-        // Output info
-        size_t num_output_nodes = session.GetOutputCount();
-        std::vector<const char*> output_node_names;
-        std::vector<std::string> output_node_names_alloc;
-        for(size_t i = 0; i < num_output_nodes; i++){
-            auto output_name = session.GetOutputNameAllocated(i, allocator);
-            output_node_names_alloc.push_back(output_name.get());
-            output_node_names.push_back(output_node_names_alloc.back().c_str());
-        }
-        
-        // Check input shape and pad if necessary (Auto-padding logic from main.cpp)
-        auto input_type_info = session.GetInputTypeInfo(0);
-        auto input_tensor_info = input_type_info.GetTensorTypeAndShapeInfo();
-        auto input_dims = input_tensor_info.GetShape();
-        ONNXTensorElementDataType input_type = input_tensor_info.GetElementType();
-        
-        std::vector<float> input_tensor_values = prep.blob;
-        // prep.img_resized is actually the padded image returned by preprocess
-        std::vector<int64_t> input_shape = {1, 3, prep.img_resized.rows, prep.img_resized.cols};
-        
-        int64_t current_h = input_shape[2];
-        int64_t current_w = input_shape[3];
-        
-        if (input_dims.size() >= 4) {
-            int64_t model_h = input_dims[2];
-            int64_t model_w = input_dims[3];
-            
-            if (model_h > 0 && model_w > 0) {
-                if (current_h < model_h || current_w < model_w) {
-                    // Create new larger buffer
-                    std::vector<float> padded_blob(1 * 3 * model_h * model_w, 114.0f/255.0f);
-                    
-                    for (int c = 0; c < 3; ++c) {
-                        for (int h = 0; h < current_h; ++h) {
-                            // Copy row
-                            const float* src = input_tensor_values.data() + c * current_h * current_w + h * current_w;
-                            float* dst = padded_blob.data() + c * model_h * model_w + h * model_w;
-                            std::copy(src, src + current_w, dst);
-                        }
-                    }
-                    
-                    input_tensor_values = padded_blob;
-                    input_shape[2] = model_h;
-                    input_shape[3] = model_w;
+        // Load model
+        std::cout << "Loading model: " << model_path << "\n";
+        inference::OnnxSession session(model_path, 4);
+
+        // Lambda for inference (image mode)
+        auto infer_func = [&](const cv::Mat& frame) -> std::vector<Detection> {
+            // 1. Preprocess
+            cv::Mat padded;
+            auto meta = letterbox_resize(frame, padded, INPUT_W, INPUT_H, STRIDE, 114);
+            std::vector<float> blob;
+            hwc_to_chw_bgr2rgb(padded, blob);
+
+            // 2. Inference
+            auto [output, shape] = session.run(blob.data(), {1, 3, INPUT_H, INPUT_W});
+
+            // 3. Postprocess (auto-detect and cache YOLO config)
+            static YoloConfig cached_cfg;
+            static bool first_run = true;
+            if (first_run) {
+                cached_cfg = YoloConfig::detect(shape);
+                cached_cfg.print();
+                std::cout << "\n";
+                first_run = false;
+            }
+
+            return postprocess_yolo(output.data(), cached_cfg, meta, CONF_THRES, IOU_THRES);
+        };
+
+        if (is_video(input_path)) {
+            // ========== Video inference ==========
+            cv::VideoCapture cap(input_path);
+            if (!cap.isOpened()) {
+                throw std::runtime_error("Failed to open video: " + input_path);
+            }
+
+            int fps = cap.get(cv::CAP_PROP_FPS);
+            int width = cap.get(cv::CAP_PROP_FRAME_WIDTH);
+            int height = cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+            int total_frames = cap.get(cv::CAP_PROP_FRAME_COUNT);
+
+            std::cout << "\n=== Video Info ===\n";
+            std::cout << "Resolution: " << width << "x" << height << "\n";
+            std::cout << "FPS: " << fps << "\n";
+            std::cout << "Total frames: " << total_frames << "\n";
+            if (max_frames > 0) std::cout << "Limit: " << max_frames << " frames\n";
+            std::cout << "\n";
+
+            cv::VideoWriter writer;
+            if (!save_path.empty()) {
+                int fourcc = cv::VideoWriter::fourcc('m', 'p', '4', 'v');
+                writer.open(save_path, fourcc, fps, cv::Size(width, height));
+                if (writer.isOpened()) {
+                    std::cout << "Output: " << save_path << "\n\n";
                 }
             }
-        }
-        
-        Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        
-        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, input_tensor_values.data(), input_tensor_values.size(), input_shape.data(), input_shape.size());
-        
-        // Handle Float16 input
-        std::vector<Ort::Float16_t> fp16_input_values;
-        if (input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-            fp16_input_values.reserve(input_tensor_values.size());
-            for (float v : input_tensor_values) {
-                fp16_input_values.emplace_back(v);
+
+            // Pre-allocate buffers for video processing (avoid per-frame allocation)
+            cv::Mat padded_buffer;
+            std::vector<float> blob_buffer(3 * INPUT_H * INPUT_W);
+
+            // Optimized video inference lambda (uses pre-allocated buffers + cached config)
+            auto video_infer_func = [&](const cv::Mat& frame) -> std::vector<Detection> {
+                // 1. Preprocess (reuse buffers)
+                auto meta = letterbox_resize(frame, padded_buffer, INPUT_W, INPUT_H, STRIDE, 114);
+                hwc_to_chw_bgr2rgb(padded_buffer, blob_buffer, true);  // true = pre-allocated
+
+                // 2. Inference
+                auto [output, shape] = session.run(blob_buffer.data(), {1, 3, INPUT_H, INPUT_W});
+
+                // 3. Postprocess (cache YOLO config to avoid repeated detection)
+                static YoloConfig cached_cfg;
+                static bool first_run = true;
+                if (first_run) {
+                    cached_cfg = YoloConfig::detect(shape);
+                    cached_cfg.print();
+                    std::cout << "\n";
+                    first_run = false;
+                }
+
+                return postprocess_yolo(output.data(), cached_cfg, meta, CONF_THRES, IOU_THRES);
+            };
+
+            std::cout << "Processing video...\n\n";
+
+            // Memory monitoring
+            MemoryInfo mem_start, mem_current, mem_peak;
+            mem_start.update();
+            mem_current = mem_start;
+            mem_peak = mem_start;
+
+            int frame_count = 0;
+            auto start_time = std::chrono::high_resolution_clock::now();
+
+            cv::Mat frame;
+            while (cap.read(frame)) {
+                frame_count++;
+                if (max_frames > 0 && frame_count > max_frames) break;
+
+                auto results = video_infer_func(frame);
+                draw_detections(frame, results);
+
+                if (writer.isOpened()) writer.write(frame);
+                if (show_result) {
+                    cv::imshow("Inference", frame);
+                    if (cv::waitKey(1) == 27) break;  // ESC to exit
+                }
+
+                // Update memory tracking
+                mem_current.update();
+                if (mem_current.vm_rss_kb > mem_peak.vm_rss_kb) {
+                    mem_peak = mem_current;
+                }
+
+                // Print progress (every 30 frames or first frame)
+                if (frame_count % 30 == 0 || frame_count == 1) {
+                    auto now = std::chrono::high_resolution_clock::now();
+                    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
+                    double current_fps = frame_count * 1000.0 / elapsed_ms;
+                    std::cout << "\rFrame: " << frame_count
+                             << " | FPS: " << std::fixed << std::setprecision(1) << current_fps
+                             << " | Det: " << results.size()
+                             << " | " << mem_current.to_string() << "     " << std::flush;
+                }
             }
-            input_tensor = Ort::Value::CreateTensor<Ort::Float16_t>(memory_info, fp16_input_values.data(), fp16_input_values.size(), input_shape.data(), input_shape.size());
+
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+
+            std::cout << "\n\n=== Performance Summary ===\n";
+            std::cout << "Processed: " << frame_count << " frames\n";
+            std::cout << "Time: " << std::fixed << std::setprecision(2) << (total_ms / 1000.0) << " s\n";
+            std::cout << "Average FPS: " << std::fixed << std::setprecision(2)
+                     << (frame_count * 1000.0 / total_ms) << "\n";
+
+            // Memory summary
+            std::cout << "\n=== Memory Summary ===\n";
+            std::cout << "Initial:  " << mem_start.to_string() << "\n";
+            std::cout << "Final:    " << mem_current.to_string() << "\n";
+            std::cout << "Peak:     " << mem_peak.to_string() << "\n";
+
+            // Memory leak detection
+            long mem_increase_kb = static_cast<long>(mem_current.vm_rss_kb) - static_cast<long>(mem_start.vm_rss_kb);
+            double mem_per_frame_kb = frame_count > 0 ? static_cast<double>(mem_increase_kb) / frame_count : 0.0;
+            std::cout << "Increase: " << std::fixed << std::setprecision(1)
+                     << (mem_increase_kb / 1024.0) << " MB total, "
+                     << mem_per_frame_kb << " KB/frame\n";
+
+            if (frame_count > 100 && mem_per_frame_kb > 10.0) {
+                std::cout << "\n⚠️  Warning: Memory leak detected (>" << mem_per_frame_kb << " KB/frame)\n";
+            }
+
+            cap.release();
+            if (writer.isOpened()) {
+                writer.release();
+                std::cout << "\nOutput saved: " << save_path << "\n";
+            }
+            if (show_result) cv::destroyAllWindows();
+
+        } else {
+            // ========== Image inference ==========
+            std::cout << "Loading image: " << input_path << "\n";
+            cv::Mat img = cv::imread(input_path);
+            if (img.empty()) {
+                throw std::runtime_error("Failed to load image");
+            }
+            std::cout << "Image size: " << img.cols << "x" << img.rows << "\n\n";
+
+            auto start = std::chrono::high_resolution_clock::now();
+            auto results = infer_func(img);
+            auto end = std::chrono::high_resolution_clock::now();
+
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+            std::cout << "Inference time: " << elapsed << " ms\n";
+
+            print_results(results);
+
+            if (show_result || !save_path.empty()) {
+                draw_detections(img, results);
+
+                if (!save_path.empty()) {
+                    cv::imwrite(save_path, img);
+                    std::cout << "\nResult saved: " << save_path << "\n";
+                }
+
+                if (show_result) {
+                    cv::imshow("Result", img);
+                    std::cout << "Press any key to exit...\n";
+                    cv::waitKey(0);
+                }
+            }
         }
 
-        auto output_tensors = session.Run(Ort::RunOptions{nullptr}, input_node_names.data(), &input_tensor, 1, output_node_names.data(), 1);
-        
-        auto end_infer = std::chrono::high_resolution_clock::now();
-        
-        // 3. Postprocess
-        auto start_post = std::chrono::high_resolution_clock::now();
-        
-        float* floatarr = nullptr;
-        std::vector<float> float_output_buffer;
-        
-        auto output_info = output_tensors[0].GetTensorTypeAndShapeInfo();
-        auto output_dims = output_info.GetShape();
-        
-        if (output_info.GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-             const Ort::Float16_t* fp16_out = output_tensors[0].GetTensorData<Ort::Float16_t>();
-             size_t count = output_info.GetElementCount();
-             float_output_buffer.resize(count);
-             for(size_t i=0; i<count; ++i) {
-                 float_output_buffer[i] = fp16_out[i].ToFloat();
-             }
-             floatarr = float_output_buffer.data();
-        } else {
-             floatarr = output_tensors[0].GetTensorMutableData<float>();
-        }
-        
-        // Handle [1, 25200, 85] vs [1, 85, 25200]
-        int64_t dim1 = output_dims[1];
-        int64_t dim2 = output_dims[2];
-        bool transposed = (dim1 < dim2 && dim2 > 100);
-        int64_t num_boxes = transposed ? dim2 : dim1;
-        int64_t box_dim = transposed ? dim1 : dim2;
-        
-        std::vector<Detection> proposals;
-        
-        for (int i = 0; i < num_boxes; ++i) {
-            float cx, cy, w, h, obj_conf;
-            
-            if (transposed) {
-                cx = floatarr[0 * num_boxes + i];
-                cy = floatarr[1 * num_boxes + i];
-                w  = floatarr[2 * num_boxes + i];
-                h  = floatarr[3 * num_boxes + i];
-                obj_conf = floatarr[4 * num_boxes + i];
-            } else {
-                const float* row = floatarr + i * box_dim;
-                cx = row[0];
-                cy = row[1];
-                w  = row[2];
-                h  = row[3];
-                obj_conf = row[4];
-            }
-            
-            if (obj_conf < CONF_THRES) continue;
-            
-            float max_cls_conf = 0;
-            int cls_id = 0;
-            
-            int cls_start = 5;
-            int num_classes = box_dim - 5;
-            
-            if (transposed) {
-                for (int c = 0; c < num_classes; ++c) {
-                    float conf = floatarr[(cls_start + c) * num_boxes + i];
-                    if (conf > max_cls_conf) {
-                        max_cls_conf = conf;
-                        cls_id = c;
-                    }
-                }
-            } else {
-                const float* row = floatarr + i * box_dim;
-                for (int c = 0; c < num_classes; ++c) {
-                    float conf = row[cls_start + c];
-                    if (conf > max_cls_conf) {
-                        max_cls_conf = conf;
-                        cls_id = c;
-                    }
-                }
-            }
-            
-            float score = obj_conf * max_cls_conf;
-            if (score < CONF_THRES) continue;
-            
-            // Coordinate restoration
-            float x = cx - w / 2.0f;
-            float y = cy - h / 2.0f;
-            
-            // Reverse letterbox
-            x = (x - prep.pad_w) / prep.scale;
-            y = (y - prep.pad_h) / prep.scale;
-            w = w / prep.scale;
-            h = h / prep.scale;
-            
-            proposals.push_back({x, y, w, h, score, cls_id});
-        }
-        
-        std::vector<Detection> results = nms(proposals, IOU_THRES);
-        
-        auto end_post = std::chrono::high_resolution_clock::now();
-        
-        // Print timings
-        std::cout << "Preprocess: " << std::chrono::duration_cast<std::chrono::milliseconds>(end_pre - start_pre).count() << " ms\n";
-        std::cout << "Inference: " << std::chrono::duration_cast<std::chrono::milliseconds>(end_infer - start_infer).count() << " ms\n";
-        std::cout << "Postprocess: " << std::chrono::duration_cast<std::chrono::milliseconds>(end_post - start_post).count() << " ms\n";
-        
-        // Print results
-        std::cout << "\n=== Detection Results ===\n";
-        for (size_t i = 0; i < results.size(); ++i) {
-            const auto& det = results[i];
-            std::string label = (det.class_id >= 0 && det.class_id < LABELS.size()) ? LABELS[det.class_id] : "unknown";
-            std::cout << "Box " << (i+1) << ": " << label << " (" << det.x << ", " << det.y << ", " << det.w << ", " << det.h << ") conf=" << det.score << "\n";
-        }
-        std::cout << "Total: " << results.size() << " detections\n";
-        
-        if (show_result) {
-            cv::Mat draw_img = cv::imread(image_path);
-            for (const auto& det : results) {
-                cv::rectangle(draw_img, cv::Rect(det.x, det.y, det.w, det.h), cv::Scalar(0, 255, 0), 2);
-                std::string label = (det.class_id >= 0 && det.class_id < LABELS.size()) ? LABELS[det.class_id] : "unknown";
-                std::string text = label + " " + std::to_string(det.score).substr(0, 4);
-                cv::putText(draw_img, text, cv::Point(det.x, det.y - 5), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
-            }
-            cv::imshow("CPP Detections", draw_img);
-            std::cout << "Press any key to exit...\n";
-            cv::waitKey(0);
-        }
-        
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
     }
-    
+
     return 0;
 }
