@@ -109,10 +109,6 @@ public:
     /// @return {{col1_data}, {col2_data}, ...} 行格式
     LuaIntf::LuaRef extract_columns_lua(lua_State* L, const std::vector<int64_t>& cols) const;
 
-    /// 提取列返回 Tensor (拷贝数据)
-    Tensor extract_columns_tensor(const std::vector<int64_t>& cols) const;
-
-
     // ==================== 元素访问（支持 stride）====================
     // 实现文件: tensor_core.cpp
 
