@@ -13,7 +13,7 @@ make
 # Run Lua-based inference (recommended)
 ./build/lua_runner scripts/yolo11_tensor_detector.lua models/yolo11n.onnx images/zidane.jpg
 
-# Run pure C++ inference (for benchmarking, YOLOv5 only)
+# Run pure C++ inference 
 ./build/cpp_infer models/yolov5n.onnx images/zidane.jpg
 
 # Run tensor API tests
